@@ -24,9 +24,20 @@ function sevenZip() {
     if (full) return { exe: full, rar: true };
   }
   const bundled = require('7zip-bin').path7za.replace('app.asar', 'app.asar.unpacked');
-  // Packaging can drop the executable bit on Linux.
-  if (process.platform !== 'win32') { try { fs.chmodSync(bundled, 0o755); } catch {} }
-  return { exe: bundled, rar: false };
+  return { exe: process.platform === 'win32' ? bundled : executableCopy(bundled), rar: false };
+}
+
+/**
+ * npm installs and packaging can drop the executable bit on Linux, and inside an AppImage the file is on
+ * a read-only mount where chmod fails. Fix it in place when possible, otherwise run a temp copy.
+ */
+function executableCopy(file) {
+  try { fs.accessSync(file, fs.constants.X_OK); return file; } catch {}
+  try { fs.chmodSync(file, 0o755); fs.accessSync(file, fs.constants.X_OK); return file; } catch {}
+  const copy = path.join(os.tmpdir(), `strc-${path.basename(file)}-${fs.statSync(file).size}`);
+  if (!exists(copy)) fs.copyFileSync(file, copy);
+  fs.chmodSync(copy, 0o755);
+  return copy;
 }
 
 async function extract(archive, destDir) {
@@ -158,4 +169,4 @@ class Installer {
   }
 }
 
-module.exports = { Installer, analyze, extract, ARCHIVE_EXT };
+module.exports = { Installer, analyze, extract, sevenZip, executableCopy, ARCHIVE_EXT };

@@ -9,7 +9,7 @@ const { IniDoc } = require('../src/core/ini');
 const plugins = require('../src/core/plugins');
 const game = require('../src/core/game');
 const { BackupStore } = require('../src/core/backup');
-const { Installer, analyze } = require('../src/core/installer');
+const { Installer, analyze, sevenZip } = require('../src/core/installer');
 const share = require('../src/core/share');
 const configs = require('../src/core/configs');
 const cleanup = require('../src/core/cleanup');
@@ -128,7 +128,7 @@ test('installs an archive, backs up what it replaces, uninstall moves it to back
   fs.mkdirSync(path.join(paths.dataDir, 'meshes'), { recursive: true });
   fs.writeFileSync(path.join(paths.dataDir, 'meshes', 'a.nif'), 'old');
   const archive = path.join(root, 'Cool Mod-123-1-0.7z');
-  const r7 = await run(require('7zip-bin').path7za, ['a', archive, src]);
+  const r7 = await run(sevenZip().exe, ['a', archive, src]);
   assert.ok(r7.ok, r7.stderr);
 
   const store = new BackupStore(paths);
@@ -151,7 +151,7 @@ test('updating an app-installed mod replaces its own files and backs up only dro
     const src = path.join(root, 'src-' + name, 'Mod');
     for (const [f, body] of Object.entries(files)) { fs.mkdirSync(path.dirname(path.join(src, f)), { recursive: true }); fs.writeFileSync(path.join(src, f), body); }
     const out = path.join(root, `${name}.7z`);
-    assert.ok((await run(require('7zip-bin').path7za, ['a', out, src])).ok);
+    assert.ok((await run(sevenZip().exe, ['a', out, src])).ok);
     return out;
   };
   fs.mkdirSync(path.join(paths.dataDir, 'textures'), { recursive: true });
@@ -279,4 +279,15 @@ test('resolveCI and parsePsOutput', () => {
     '/usr/bin/wine /games/Skyrim Special Edition/Data/SkyrimTogetherReborn/SkyrimTogetherServer.exe',
   ].join('\n'));
   for (const n of ['steam', 'skyrimse.exe', 'skyrimtogetherserver.exe']) assert.ok(names.has(n), n);
+});
+
+test('Linux: bundled 7-Zip without the executable bit still runs', { skip: process.platform === 'win32' }, async () => {
+  const { executableCopy } = require('../src/core/installer');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'strc-7z-'));
+  const copy = path.join(tmp, '7za');
+  fs.copyFileSync(require('7zip-bin').path7za, copy);
+  fs.chmodSync(copy, 0o644);
+  const exe = executableCopy(copy);
+  const r = await run(exe, ['i']);
+  assert.ok(r.ok, r.stderr);
 });
