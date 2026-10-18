@@ -26,11 +26,25 @@ async function call(channel, ...args) {
   }
 }
 
-function modal(html, onMount) {
+// Whatever should happen when the open modal is dismissed (Cancel, Esc, or a click outside it).
+let modalOnDismiss = null;
+
+function closeModal() {
+  $('#modal').classList.add('hidden');
+  const f = modalOnDismiss;
+  modalOnDismiss = null;
+  if (f) f();
+}
+
+/** Opens a modal. `onDismiss` runs if it's closed without the dialog handling it itself. */
+function modal(html, onMount, onDismiss = null) {
+  // Opening a new modal dismisses the previous one, so its caller isn't left waiting forever.
+  if (modalOnDismiss) { const f = modalOnDismiss; modalOnDismiss = null; f(); }
   $('#modalCard').innerHTML = html;
   $('#modal').classList.remove('hidden');
-  const close = () => $('#modal').classList.add('hidden');
-  $('#modalCard').querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', close));
+  modalOnDismiss = onDismiss;
+  const close = () => { modalOnDismiss = null; $('#modal').classList.add('hidden'); };
+  $('#modalCard').querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', closeModal));
   if (onMount) onMount($('#modalCard'), close);
   return close;
 }
@@ -40,9 +54,9 @@ function confirmBox(title, body, okLabel = 'Continue') {
     modal(`<h2>${esc(title)}</h2><div class="sub">${body}</div>
       <div class="actions"><button class="btn" data-close>Cancel</button><button class="btn primary" id="okBtn">${esc(okLabel)}</button></div>`,
     (card, close) => {
-      card.querySelector('[data-close]').addEventListener('click', () => resolve(false));
       card.querySelector('#okBtn').addEventListener('click', () => { close(); resolve(true); });
-    });
+      card.querySelector('#okBtn').focus();
+    }, () => resolve(false));
   });
 }
 
@@ -150,7 +164,10 @@ async function dashboard() {
   $('#toPlay').addEventListener('click', () => go('play'));
   main().querySelectorAll('[data-fix]').forEach(b => b.addEventListener('click', async () => {
     const fix = checks[Number(b.dataset.fix)].fix;
-    if (fix.action === 'goto') return go(fix.page);
+    if (fix.action === 'goto') {
+      if (fix.page === 'logs' && fix.tab) logTab = fix.tab;
+      return go(fix.page);
+    }
     if (fix.action === 'backupCC') {
       const ok = await confirmBox('Move Anniversary Edition content to backup?', `The ${s.ccRemovable} paid/AE add-ons will be moved to the backup folder. The 4 free files USSEP needs stay. You can restore them any time from Backups.`, 'Move to backup');
       if (!ok) return;
@@ -158,7 +175,10 @@ async function dashboard() {
     busy(b, true);
     try {
       const r = await call('fix:run', fix);
-      toast(r && r.moved !== undefined ? `Moved ${r.moved} files to backup` : r && r.restored !== undefined ? `Restored ${r.restored} files` : 'Done', 'ok');
+      const msg = r && r.moved !== undefined ? `Moved ${r.moved} files to backup`
+        : r && r.restored !== undefined ? `Restored ${r.restored} files`
+          : fix.action === 'activatePlugins' ? `Switched on ${fix.names.join(' and ')}` : 'Done';
+      toast(msg, 'ok');
       render();
     } catch { busy(b, false); }
   }));
@@ -166,7 +186,8 @@ async function dashboard() {
 
 // ---------- Play & Server ----------
 async function play() {
-  const [st, net] = await Promise.all([call('launch:status'), call('net:info')]);
+  const [procs, net, prefs] = await Promise.all([call('launch:status'), call('net:info'), call('settings:set', {})]);
+  const st = { ...procs, autoSnapshot: prefs.autoSnapshot };
   const pill = (on, label, onText = 'running', offText = 'not running') => `<span class="pill ${on ? 'ok' : ''}">● ${label}: ${on ? onText : offText}</span>`;
   main().innerHTML = head('Play & Server', 'Start your session from here. As host, start the server first, then launch the game and connect to it.') + `
     <div class="hero">
@@ -178,6 +199,7 @@ async function play() {
           ${st.vortex ? '<span class="pill warn">Vortex is open — avoid deploying while playing</span>' : ''}
         </div>
         <div class="row"><button class="btn primary big" id="launch">▶ Launch Skyrim Together</button></div>
+        <label class="row sub" style="cursor:pointer"><span class="switch"><input type="checkbox" id="autoSnap" ${st.autoSnapshot ? 'checked' : ''}><span></span></span>Snapshot my saves before every launch</label>
         ${isLinux() && state.protonLauncher === false ? `<div class="callout"><b>protontricks is needed on Linux</b> to start Skyrim Together inside Skyrim's Proton prefix. Install it from your distro or Flathub (<span class="mono">com.github.Matoking.protontricks</span>).</div>` : ''}
         <div class="callout blue"><b>Connecting:</b> In game, press <b>F2</b> (or Right-Ctrl) to open the Skyrim Together menu and use <b>Connect</b>. Friends enter your IP and port plus the join password.</div>
       </div>
@@ -188,6 +210,7 @@ async function play() {
         <div class="sub">Share these with your friends:</div>
         <div class="copyable"><code id="ipLine">Public IP hidden — click Show</code><button class="btn small" id="showIp">Show</button><button class="btn small" id="copyIp">Copy</button></div>
         <div class="sub">On the same Wi-Fi / LAN: <span class="mono">${esc(net.local.join(', ') || 'unknown')}</span></div>
+        <div class="row"><button class="btn" id="invite">✉ Copy invite for your group chat</button></div>
         <div id="session"></div>
       </div>
     </div>
@@ -215,11 +238,18 @@ async function play() {
   $('#copyIp').addEventListener('click', async () => { if (!publicIp) publicIp = await call('net:publicIp'); ipLine(); copy(`${publicIp}:${port}`); });
   $('#toFriends').addEventListener('click', e => { e.preventDefault(); go('friends'); });
   $('#launch').addEventListener('click', async e => {
-    busy(e.currentTarget, true, 'Launching…');
+    busy(e.currentTarget, true, $('#autoSnap').checked ? 'Snapshotting saves…' : 'Launching…');
     try {
       const r = await call('launch:client');
-      toast(r.steamStarted ? 'Starting Steam and Skyrim Together…' : 'Launching Skyrim Together…', 'ok');
-    } finally { setTimeout(() => busy($('#launch'), false), 3000); }
+      const snap = r.snapshot && !r.snapshot.error ? ` Saves snapshotted (${r.snapshot.files} files).` : '';
+      toast((r.steamStarted ? 'Starting Steam and Skyrim Together…' : 'Launching Skyrim Together…') + snap, 'ok');
+      if (r.snapshot && r.snapshot.error) toast(`Couldn't snapshot saves: ${r.snapshot.error}`, 'err');
+    } catch { /* toast already shown */ } finally { setTimeout(() => busy($('#launch'), false), 3000); }
+  });
+  $('#autoSnap').addEventListener('change', e => call('settings:set', { autoSnapshot: e.target.checked }));
+  $('#invite').addEventListener('click', async () => {
+    if (!publicIp) { try { publicIp = await call('net:publicIp'); ipLine(); } catch { /* invite still works with a placeholder */ } }
+    copy(await call('share:invite', publicIp));
   });
   $('#startSrv').addEventListener('click', async () => { await call('launch:server'); toast('Server starting in its own window', 'ok'); setTimeout(render, 2500); });
   $('#stopSrv').addEventListener('click', async () => {
@@ -227,8 +257,18 @@ async function play() {
     await call('launch:stopServer'); toast('Server stopped'); setTimeout(render, 1500);
   });
 
-  const refreshSession = async () => {
-    const [s, procs] = await Promise.all([api.call('server:session').catch(() => null), api.call('launch:status').catch(() => ({}))]);
+  // One poll for both the status pills and the player list, so the process list is read once per tick.
+  const refresh = async () => {
+    const [s, procs] = await Promise.all([api.call('server:session').catch(() => null), api.call('launch:status').catch(() => null)]);
+    if (!$('#procStatus')) return;
+    if (procs) {
+      $('#procStatus').innerHTML = `${pill(procs.steam, 'Steam')} ${pill(procs.client || procs.game, 'Skyrim')} ${pill(procs.server, 'Server')} ${procs.vortex ? '<span class="pill warn">Vortex is open — avoid deploying while playing</span>' : ''}`;
+      $('#startSrv').disabled = procs.server; $('#stopSrv').disabled = !procs.server;
+      setLaunchState(procs);
+    }
+    renderSession(s, procs || {});
+  };
+  const renderSession = (s, procs) => {
     if (!s || !$('#session')) return;
     if (s.port) { port = s.port; $('#portLbl').textContent = s.port; ipLine(); }
     // The log keeps the last session's players after the server closes, so only trust it while it runs.
@@ -241,15 +281,8 @@ async function play() {
       <div class="players">${s.players.length ? s.players.map(p => `<div class="player"><div class="avatar">${esc((p.name || '?')[0].toUpperCase())}</div><div><b>${esc(p.name)}</b><div class="sub">${p.mods} mods · joined ${esc((p.since || '').slice(11, 16))}</div></div></div>`).join('') : '<div class="sub">Nobody connected.</div>'}</div>
       ${s.events.length ? `<h3>Recent activity</h3><div class="events">${s.events.slice().reverse().map(e => `<div style="${e.warn ? 'color:var(--warn)' : ''}">${esc(e.ts.slice(11, 19))} — ${esc(e.text)}</div>`).join('')}</div>` : ''}`;
   };
-  await refreshSession();
-  state.timers.push(setInterval(refreshSession, 5000));
-  state.timers.push(setInterval(async () => {
-    const s = await api.call('launch:status').catch(() => null);
-    if (!s || !$('#procStatus')) return;
-    $('#procStatus').innerHTML = `${pill(s.steam, 'Steam')} ${pill(s.client || s.game, 'Skyrim')} ${pill(s.server, 'Server')} ${s.vortex ? '<span class="pill warn">Vortex is open — avoid deploying while playing</span>' : ''}`;
-    $('#startSrv').disabled = s.server; $('#stopSrv').disabled = !s.server;
-    setLaunchState(s);
-  }, 4000));
+  renderSession(await api.call('server:session').catch(() => null), st);
+  state.timers.push(setInterval(refresh, 4000));
 }
 
 // ---------- Mods ----------
@@ -367,6 +400,12 @@ async function manualDownload(m) {
     });
   });
 }
+
+// Premium downloads report progress; show it on the mod's Install button.
+api.on('progress', ({ id, p }) => {
+  const b = document.querySelector(`[data-act="install"][data-id="${Number(id)}"]`);
+  if (b && b.disabled) b.innerHTML = `<span class="spinner"></span> Downloading ${Math.round(p * 100)}%`;
+});
 
 api.on('download:found', ({ file, modId, name, size }) => {
   modal(`<h2>Download finished</h2>
@@ -568,7 +607,14 @@ async function config() {
     if (changes.size && !await confirmBox('Discard unsaved changes?', 'You have changes in this file that are not saved.', 'Discard')) return;
     cfgTab = b.dataset.tab; render();
   }));
-  $('#showAll').addEventListener('change', e => { cfgShowAll = e.target.checked; render(); });
+  $('#showAll').addEventListener('change', async e => {
+    if (changes.size && !await confirmBox('Discard unsaved changes?', 'Switching views reloads the settings, and your unsaved changes would be lost.', 'Discard')) {
+      e.target.checked = cfgShowAll;
+      return;
+    }
+    cfgShowAll = e.target.checked;
+    render();
+  });
   $('#openRaw').addEventListener('click', () => call('config:openFile', cfgTab));
   $('#discard').addEventListener('click', () => render());
   $('#save').addEventListener('click', async e => {
@@ -611,12 +657,12 @@ async function offerServerRestart(r) {
 
 // ---------- Friends Sync ----------
 async function friends() {
-  const mine = await call('share:mine');
-  main().innerHTML = head('Friends Sync', 'Mismatched setups are the #1 cause of desync in Skyrim Together. Each player copies their setup code and posts it in your group chat; paste a friend\'s code here to see what differs.') + `
+  const [mine, party] = await Promise.all([call('share:mine'), call('party:list')]);
+  main().innerHTML = head('Friends Sync', 'Mismatched setups are the #1 cause of desync in Skyrim Together. Everyone copies their setup code into your group chat; paste a friend\'s code here to see what differs — and match the host\'s load order in one click.') + `
     <div class="grid two">
       <div class="card">
         <h2>Your setup code</h2>
-        <div class="sub">Contains your game version, Skyrim Together version, plugin list and SKSE plugins — nothing personal.</div>
+        <div class="sub">Your game version, Skyrim Together version, plugin list (with Nexus links where known) and SKSE plugins — nothing personal.</div>
         <div class="row" style="margin:12px 0"><span class="sub">Your name in codes:</span><input type="text" id="pname" value="${esc(mine.setup.playerName || '')}" style="flex:1"></div>
         <div class="copyable"><code>${esc(mine.code)}</code><button class="btn primary small" id="copyCode">Copy</button></div>
         <h3>What's in it</h3>
@@ -624,20 +670,82 @@ async function friends() {
       </div>
       <div class="card">
         <h2>Compare with a friend</h2>
-        <textarea id="theirCode" rows="4" placeholder="Paste a friend's STR1-… code here"></textarea>
-        <div class="row" style="margin-top:10px"><button class="btn primary" id="compare">Compare</button></div>
+        <textarea id="theirCode" rows="4" placeholder="Paste a friend's STR2-… code here"></textarea>
+        <div class="row" style="margin-top:10px"><button class="btn primary" id="compare">Compare</button><button class="btn" id="saveParty">Save to party</button></div>
         <div id="result" style="margin-top:14px"></div>
       </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><div><h2>Your party</h2><div class="sub">Saved setup codes, re-checked against your setup every time you open this page. Ask friends for a fresh code after they change mods.</div></div></div>
+      ${party.length ? `<div class="players">${party.map((m, i) => `
+        <div class="player">
+          <div class="avatar">${esc((m.name || '?')[0].toUpperCase())}</div>
+          <div style="flex:1"><b>${esc(m.name)}</b>
+            <div class="sub">${m.invalid ? esc(m.invalid) : `Skyrim ${esc(m.theirs.gameVersion)} · STR ${esc(m.theirs.strVersion || '?')} · ${m.theirs.plugins} plugins`} · code saved ${fmtDate(m.savedAt)}</div></div>
+          ${m.invalid ? '<span class="pill err">Bad code</span>' : m.errors ? `<span class="pill err">${m.errors} to fix</span>` : m.warnings ? `<span class="pill warn">In sync · ${m.warnings} minor</span>` : '<span class="pill ok">✓ In sync</span>'}
+          <button class="btn small" data-pcompare="${i}">Compare</button>
+          <button class="btn small ghost" data-premove="${i}">Remove</button>
+        </div>`).join('')}</div>` : '<div class="sub">No one saved yet. Paste a friend\'s code above and click <b>Save to party</b>.</div>'}
     </div>`;
+
   $('#copyCode').addEventListener('click', () => copy(mine.code));
   $('#pname').addEventListener('change', async e => { await call('settings:set', { playerName: e.target.value.trim() }); render(); });
-  $('#compare').addEventListener('click', async () => {
-    const r = await call('share:compare', $('#theirCode').value);
-    const who = esc(r.theirs.playerName || 'Your friend');
-    $('#result').innerHTML = !r.diffs.length
-      ? `<div class="callout blue">✓ <b>${who}</b> has exactly the same setup. You're good to go.</div>`
-      : `<div class="sub" style="margin-bottom:8px"><b>${who}</b> — ${r.diffs.filter(d => d.level === 'error').length} must-fix, ${r.diffs.filter(d => d.level !== 'error').length} minor</div>` +
-        r.diffs.map(d => `<div class="diff ${d.level}"><div class="lvl">${{ error: 'Fix', warn: 'Check', info: 'FYI' }[d.level]}</div><div>${esc(d.text)}</div></div>`).join('');
+  $('#compare').addEventListener('click', () => compareCode($('#theirCode').value));
+  $('#saveParty').addEventListener('click', async () => {
+    const r = await call('party:save', $('#theirCode').value);
+    toast(`Saved ${r.name} to your party`, 'ok');
+    render();
+  });
+  main().querySelectorAll('[data-pcompare]').forEach(b => b.addEventListener('click', () => {
+    const m = party[Number(b.dataset.pcompare)];
+    $('#theirCode').value = m.code;
+    compareCode(m.code);
+    $('#result').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }));
+  main().querySelectorAll('[data-premove]').forEach(b => b.addEventListener('click', async () => {
+    const m = party[Number(b.dataset.premove)];
+    if (!await confirmBox(`Remove ${m.name}?`, 'Their saved setup code is removed from your party list.', 'Remove')) return;
+    await call('party:remove', m.name);
+    render();
+  }));
+}
+
+async function compareCode(code) {
+  const r = await call('share:compare', code);
+  if (!$('#result')) return;
+  const whoRaw = r.theirs.playerName || 'Your friend';
+  const who = esc(whoRaw);
+  const p = r.plan;
+  const pluginIssues = p.changes || p.missing.length || p.extraImplicit.length;
+  const planHtml = pluginIssues ? `
+    <div class="card" style="margin-top:12px;padding:14px 16px">
+      <h3 style="margin-top:0">Match ${who}'s load order</h3>
+      <div class="sub">Use this when ${who} is the host or party leader. Your Plugins.txt is snapshotted first and nothing is deleted — plugins they don't use are just switched off.</div>
+      <ul class="sub" style="margin:8px 0 0 18px;padding:0">
+        ${p.reorder ? '<li>Reorder your plugins to match theirs</li>' : ''}
+        ${p.activate.length ? `<li>Switch on: <span class="mono">${p.activate.map(esc).join(', ')}</span></li>` : ''}
+        ${p.deactivate.length ? `<li>Switch off: <span class="mono">${p.deactivate.map(esc).join(', ')}</span></li>` : ''}
+      </ul>
+      ${p.missing.length ? `<div class="sub" style="margin-top:10px"><b style="color:var(--warn)">You need to install ${p.missing.length} mod${p.missing.length > 1 ? 's' : ''} first:</b></div>
+        <div class="players" style="margin-top:6px">${p.missing.map(m => `<div class="player"><span class="mono" style="flex:1">${esc(m.name)}</span>${m.nexusId ? `<button class="btn small" data-nexus="${Number(m.nexusId)}">Nexus page</button>` : '<span class="sub">ask them which mod this is</span>'}</div>`).join('')}</div>` : ''}
+      ${p.extraImplicit.length ? `<div class="sub" style="margin-top:10px">You have Creation Club content they don't (<span class="mono">${p.extraImplicit.map(esc).join(', ')}</span>). It can't be switched off — move it to backup on the <a href="#" id="toCleanup">Cleanup</a> page.</div>` : ''}
+      ${p.changes ? `<div class="row" style="margin-top:12px"><button class="btn primary" id="applyMatch">Match their load order</button></div>` : ''}
+    </div>` : '';
+  $('#result').innerHTML = (!r.diffs.length
+    ? `<div class="callout blue">✓ <b>${who}</b> has exactly the same setup. You're good to go.</div>`
+    : `<div class="sub" style="margin-bottom:8px"><b>${who}</b> — ${r.diffs.filter(d => d.level === 'error').length} must-fix, ${r.diffs.filter(d => d.level !== 'error').length} minor</div>` +
+      r.diffs.map(d => `<div class="diff ${d.level}"><div class="lvl">${{ error: 'Fix', warn: 'Check', info: 'FYI' }[d.level]}</div><div>${esc(d.text)}</div></div>`).join('')) + planHtml;
+  $('#result').querySelectorAll('[data-nexus]').forEach(b => b.addEventListener('click', () => call('mods:openNexus', Number(b.dataset.nexus), 'files')));
+  const tc = $('#toCleanup');
+  if (tc) tc.addEventListener('click', e => { e.preventDefault(); go('cleanup'); });
+  const apply = $('#applyMatch');
+  if (apply) apply.addEventListener('click', async () => {
+    const lines = [p.reorder && 'reorder your plugins', p.activate.length && `switch on ${p.activate.length}`, p.deactivate.length && `switch off ${p.deactivate.length}`].filter(Boolean).join(', ');
+    if (!await confirmBox(`Match ${whoRaw}'s load order?`, `This will ${esc(lines)}. Your current Plugins.txt is saved to Backups first.${p.missing.length ? `<br><br><b>${p.missing.length} of their mods are still missing</b> — install them too, or the setups won't fully match.` : ''}`, 'Match load order')) return;
+    const res = await call('share:applyMatch', code);
+    toast('Load order updated to match', 'ok');
+    if (res.manager === 'Vortex') toast('Vortex may re-sort plugins on its next deploy — lock the load order or turn off auto-sort in Vortex.', '');
+    compareCode(code);
   });
 }
 
@@ -674,24 +782,49 @@ async function session() {
 
 // ---------- Backups ----------
 async function backups() {
-  const [list, snaps] = await Promise.all([call('backups:list'), call('saves:list')]);
-  main().innerHTML = head('Backups', 'Your campaign saves, plus everything this app moved or replaced. Restoring puts files back exactly where they were.', '<button class="btn" id="openB">Open backup folder</button>') + `
+  const [list, snaps, usage, prefs] = await Promise.all([call('backups:list'), call('saves:list'), call('backups:usage'), call('settings:set', {})]);
+  main().innerHTML = head('Backups', `Your campaign saves, plus everything this app moved or replaced. Restoring puts files back exactly where they were. Using <b>${fmtSize(usage.total)}</b> of disk space.`, '<button class="btn" id="openB">Open backup folder</button>') + `
     <div class="card">
-      <div class="card-head"><div><h2>Save snapshots</h2><div class="sub">A copy of your whole Saves folder. Take one before each session — a bad sync or crash can't cost you the campaign.</div></div>
+      <div class="card-head"><div><h2>Save snapshots</h2><div class="sub">A copy of your whole Saves folder${usage.saves ? ` (${fmtSize(usage.saves)} in total)` : ''}. A bad sync or crash can't cost you the campaign.</div></div>
         <div class="row"><button class="btn" id="openSaves">Open Saves folder</button><button class="btn primary" id="snapNow">Snapshot saves now</button></div></div>
+      <div class="row sub" style="margin-bottom:12px">
+        <label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="autoSnap" ${prefs.autoSnapshot ? 'checked' : ''}><span></span></span>Snapshot automatically before every launch</label>
+        <span class="spacer"></span>Keep the newest <input type="number" id="keepAuto" min="1" max="100" value="${Number(prefs.keepAutoSnapshots) || 10}" style="width:70px"> automatic ones (yours are never removed)
+      </div>
       ${snaps.length ? `<div class="table-wrap"><table><thead><tr><th>Taken</th><th>Files</th><th>Size</th><th>Note</th><th></th></tr></thead><tbody>
-        ${snaps.map((s, i) => `<tr><td>${fmtDate(s.createdAt)}</td><td class="sub">${s.files}</td><td class="sub">${fmtSize(s.size)}</td><td class="sub">${esc(s.note || '')}</td><td style="text-align:right"><button class="btn small" data-snap="${i}">Restore</button></td></tr>`).join('')}
+        ${snaps.map((s, i) => `<tr><td>${fmtDate(s.createdAt)} ${s.auto ? '<span class="pill">auto</span>' : ''}</td><td class="sub">${s.files}</td><td class="sub">${fmtSize(s.size)}</td><td class="sub">${esc(s.note || '')}</td>
+          <td style="text-align:right;white-space:nowrap"><button class="btn small" data-snap="${i}">Restore</button> <button class="btn small ghost" data-delsnap="${i}" title="Delete this snapshot">✕</button></td></tr>`).join('')}
       </tbody></table></div>` : '<div class="sub">No snapshots yet.</div>'}
     </div>
-    <h3>Moved and replaced files</h3>` +
+    <h3>Moved and replaced files · ${fmtSize(usage.batches)}</h3>` +
     (list.length ? list.map((b, i) => `<div class="card">
       <div class="card-head"><div><h2>${esc(b.label)}</h2><div class="sub">${fmtDate(b.createdAt)} · ${b.files.length} files · ${fmtSize(b.size)} · <span class="pill">${esc(b.category)}</span></div></div>
-        <button class="btn primary" data-restore="${i}">Restore all</button></div>
+        <div class="row"><button class="btn ghost danger" data-delbatch="${i}">Delete…</button><button class="btn primary" data-restore="${i}">Restore all</button></div></div>
       <details><summary class="sub" style="cursor:pointer">Files</summary><div class="table-wrap" style="margin-top:8px"><table><tbody>
         ${b.files.map(f => `<tr><td class="mono">${esc(f.rel)}</td><td class="sub">${fmtSize(f.size || 0)}</td><td style="text-align:right"><button class="btn small" data-one="${i}" data-rel="${esc(f.rel)}">Restore</button></td></tr>`).join('')}
       </tbody></table></div></details></div>`).join('') : '<div class="empty">No backups yet.</div>');
   $('#openB').addEventListener('click', () => call('backups:open'));
   $('#openSaves').addEventListener('click', () => call('saves:open'));
+  $('#autoSnap').addEventListener('change', e => call('settings:set', { autoSnapshot: e.target.checked }));
+  $('#keepAuto').addEventListener('change', async e => {
+    const r = await call('settings:set', { keepAutoSnapshots: e.target.value });
+    e.target.value = r.keepAutoSnapshots;
+    toast(`Keeping the newest ${r.keepAutoSnapshots} automatic snapshots`, 'ok');
+  });
+  main().querySelectorAll('[data-delsnap]').forEach(b => b.addEventListener('click', async () => {
+    const s = snaps[Number(b.dataset.delsnap)];
+    if (!await confirmBox('Delete this save snapshot?', `The copy from ${fmtDate(s.createdAt)} (${fmtSize(s.size)}) is deleted for good. Your current saves aren't touched.`, 'Delete snapshot')) return;
+    await call('saves:delete', s.id);
+    toast('Snapshot deleted', 'ok');
+    render();
+  }));
+  main().querySelectorAll('[data-delbatch]').forEach(b => b.addEventListener('click', async () => {
+    const batch = list[Number(b.dataset.delbatch)];
+    if (!await confirmBox(`Delete "${batch.label}" for good?`, `<b>This can't be undone.</b> The ${batch.files.length} backed-up files (${fmtSize(batch.size)}) are permanently deleted, so you won't be able to restore them. Only do this if you're sure you don't need them.`, 'Delete permanently')) return;
+    await call('backups:delete', batch.id);
+    toast('Backup deleted', 'ok');
+    render();
+  }));
   $('#snapNow').addEventListener('click', async e => {
     busy(e.currentTarget, true, 'Copying…');
     try {
@@ -707,7 +840,14 @@ async function backups() {
     toast(`Restored ${r.restored} save files`, 'ok');
     render();
   }));
-  const done = r => { toast(`Restored ${r.restored} files${r.conflicts.length ? ` — ${r.conflicts.length} skipped because a file with that name already exists` : ''}`, r.conflicts.length ? '' : 'ok'); render(); };
+  const done = r => {
+    const notes = [
+      r.conflicts.length && `${r.conflicts.length} skipped because a file with that name already exists`,
+      r.missing && `${r.missing} were no longer in the backup folder`,
+    ].filter(Boolean).join('; ');
+    toast(`Restored ${r.restored} files${notes ? ` — ${notes}` : ''}`, notes ? '' : 'ok');
+    render();
+  };
   main().querySelectorAll('[data-restore]').forEach(b => b.addEventListener('click', async () => {
     const batch = list[Number(b.dataset.restore)];
     if (!await confirmBox(`Restore "${batch.label}"?`, `${batch.files.length} files go back into the game folder.${batch.category === 'creation-club' ? ' Every player would then need the same Creation Club content.' : ''}`, 'Restore')) return;
@@ -722,15 +862,40 @@ async function backups() {
 let logTab = 'server';
 async function logs() {
   const files = await call('logs:list');
+  const tabs = `<div class="tabs" id="logTabs">
+      <button data-tab="crashes" class="${logTab === 'crashes' ? 'active' : ''}">Crash reports</button>
+      ${files.map(f => `<button data-tab="${f.id}" class="${f.id === logTab ? 'active' : ''}">${esc(f.title)}${f.exists ? '' : ' <span class="pill">none</span>'}</button>`).join('')}</div>`;
+  const bindTabs = () => $('#logTabs').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { logTab = b.dataset.tab; render(); }));
+
+  if (logTab === 'crashes') {
+    const c = await call('logs:crashes');
+    main().innerHTML = head('Logs', 'Crash reports are summarized here: the error, and the mods that show up most in the crash. A mod being mentioned is a lead, not proof — but it\'s where to start.',
+      `<button class="btn" id="refresh">↻ Refresh</button><button class="btn" id="ack">Mark all as seen</button>`) + tabs +
+      (c.reports.length ? c.reports.map((r, i) => `<div class="card">
+        <div class="card-head"><div><h2>${fmtDate(r.at)} ${!c.ack || r.at > c.ack ? '<span class="pill warn">new</span>' : ''}</h2>
+          <div class="sub mono">${esc(r.name)} · ${esc(r.source)}</div></div>
+          <button class="btn small" data-open="${i}">Open full log</button></div>
+        ${r.exception ? `<div class="diff error"><div class="lvl">Error</div><div class="mono">${esc(r.exception)}</div></div>` : ''}
+        <div class="grid two" style="margin-top:8px">
+          <div><h3>SKSE plugins in the call stack</h3>${r.modules.length ? r.modules.map(m => `<div class="diff warn"><div class="lvl">${m.count}×</div><div class="mono">${esc(m.name)}</div></div>`).join('') : '<div class="sub">Only game and Windows code — often a bad mesh, texture or save.</div>'}</div>
+          <div><h3>Plugins mentioned</h3>${r.plugins.length ? r.plugins.map(p => `<div class="diff info"><div class="lvl">${p.count}×</div><div class="mono">${esc(p.name)}</div></div>`).join('') : '<div class="sub">No plugins mentioned.</div>'}</div>
+        </div></div>`).join('')
+        : `<div class="empty">No crash reports found.${c.clientCrashed ? ' Skyrim Together did record a crash in its last session, but there\'s no crash logger to say why.' : ''}<br>Install <b>Crash Logger SSE AE VR</b> from Mods → Stability so the next crash leaves a report.</div>`);
+    bindTabs();
+    $('#refresh').addEventListener('click', () => render());
+    $('#ack').addEventListener('click', async () => { await call('logs:ackCrashes'); toast('Crashes marked as seen', 'ok'); render(); });
+    main().querySelectorAll('[data-open]').forEach(b => b.addEventListener('click', () => call('logs:openCrash', c.reports[Number(b.dataset.open)].file)));
+    return;
+  }
+
   const cur = files.find(f => f.id === logTab) || files[0];
   const text = cur.exists ? await call('logs:tail', cur.id) : '';
-  main().innerHTML = head('Logs', 'The last 300 lines of each log. Useful when something doesn\'t load or a friend can\'t connect.', `<button class="btn" id="refresh">↻ Refresh</button><button class="btn" id="openLog" ${cur.exists ? '' : 'disabled'}>Open in editor</button>`) + `
-    <div class="tabs" id="logTabs">${files.map(f => `<button data-tab="${f.id}" class="${f.id === cur.id ? 'active' : ''}">${esc(f.title)}${f.exists ? '' : ' <span class="pill">none</span>'}</button>`).join('')}</div>
+  main().innerHTML = head('Logs', 'The last 300 lines of each log. Useful when something doesn\'t load or a friend can\'t connect.', `<button class="btn" id="refresh">↻ Refresh</button><button class="btn" id="openLog" ${cur.exists ? '' : 'disabled'}>Open in editor</button>`) + tabs + `
     <div class="sub" style="margin-bottom:8px">${cur.exists ? `${esc(cur.file)} · updated ${fmtDate(cur.updatedAt)}` : 'This log doesn\'t exist yet — it appears after the game or server runs.'}</div>
     <pre class="log" id="logText">${esc(text)}</pre>`;
   const pre = $('#logText');
   pre.scrollTop = pre.scrollHeight;
-  $('#logTabs').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { logTab = b.dataset.tab; render(); }));
+  bindTabs();
   $('#refresh').addEventListener('click', () => render());
   $('#openLog').addEventListener('click', () => call('logs:open', cur.id));
 }
@@ -780,8 +945,8 @@ async function settings() {
 }
 
 // ---------- boot ----------
-document.addEventListener('keydown', e => { if (e.key === 'Escape') $('#modal').classList.add('hidden'); });
-$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') $('#modal').classList.add('hidden'); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#modal').classList.contains('hidden')) closeModal(); });
+$('#modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
 
 (async () => {
   const init = await api.call('app:init');

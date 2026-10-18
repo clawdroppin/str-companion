@@ -50,21 +50,22 @@ The app finds Skyrim through Steam. If it doesn't, point it at the folder that c
 
 | | |
 |---|---|
-| 🩺 **Dashboard** | Health check of your whole setup: game version, SKSE, Address Library, Skyrim Together, **missing master files** (the #1 cause of startup crashes), problem mods, Anniversary Edition content, and Steam auto-updates. Most problems have a **one-click fix**. |
-| ▶️ **Play & Server** | Launch Skyrim Together, start, stop or restart your server, copy your `IP:port` for friends, and see who's connected live. |
+| 🩺 **Dashboard** | Health check of your whole setup: game version, SKSE, Address Library, Skyrim Together, **missing master files** (the #1 cause of startup crashes), plugin limits, problem mods, Anniversary Edition content, and Steam auto-updates. It also warns when **Steam updated Skyrim** since your last session, flags **Skyrim Together's plugins being switched off**, and summarizes the **last crash**. Most problems have a **one-click fix**. |
+| ▶️ **Play & Server** | Launch Skyrim Together (your saves are **snapshotted automatically first**), start, stop or restart your server, see who's connected live, and **copy a ready-made invite** (address, password and setup code) for your group chat. |
 | 🧩 **Mods** | A curated catalog (Required · Stability · Recommended · Visuals · More content), each labeled by Skyrim Together compatibility. **Install, update-check and uninstall** in one place. Add any Nexus mod by link, or install from an archive. For SKSE mods, it shows whether they **actually loaded** on your game version. |
 | 🧹 **Cleanup** | Moves Anniversary Edition add-ons into a backup, **keeping the 4 free ones USSEP needs**. Also flags known-incompatible mods, and lets you switch off or set aside any plugin, with a warning if other mods depend on it. |
 | ⚙️ **Config Editor** | Friendly editors with plain-English descriptions for `STServer.ini`, `SkyrimPrefs.ini`, `Skyrim.ini`, `SkyrimCustom.ini` and Engine Fixes. **One-click presets** include *Story Co-op (3 players)*, *Hardcore*, *Big Group*, *Performance* and *Quality*, and you can save your own. |
-| ⇄ **Friends Sync** | Each player copies a short `STR1-…` setup code. Paste a friend's code to see mismatched game versions, missing plugins and load order differences. |
-| 💾 **Backups** | **Save snapshots** before each session, plus a restorable history of every file the app moved or replaced. |
+| ⇄ **Friends Sync** | Each player copies a short `STR2-…` setup code. Paste a friend's code to see mismatched game versions, missing plugins and load order differences. **Match the host's load order in one click**, with Nexus links for anything you're missing. Save friends to your **party** and see at a glance who's in sync. |
+| 💾 **Backups** | **Save snapshots**, taken automatically before every launch (old automatic ones are pruned, yours are kept), plus a restorable history of every file the app moved or replaced. Shows disk usage, and lets you delete what you no longer need. |
 | ✅ **Session Checklist** | The pre-session routine that keeps quests in sync, plus a stuck-quest helper. |
-| 📜 **Logs** | Server, client, SKSE and Engine Fixes logs in one place. |
+| 📜 **Logs** | Server, client, SKSE and Engine Fixes logs in one place, plus a **crash report reader** that names the mods showing up most in each crash (with [Crash Logger](https://www.nexusmods.com/skyrimspecialedition/mods/59818) installed). |
 
 ### 🔒 Safe by design
 - **Nothing is ever deleted.** Files are *moved* to `<Skyrim>\_STRCompanion_Backup\`, with a manifest so every batch can be restored.
 - Config files are **snapshotted before every save**.
 - Base-game files and the plugins Skyrim Together needs are **locked** and can't be moved.
-- INI saves are **blocked while Skyrim is running**, because the game would overwrite them on exit.
+- INI and load-order changes are **blocked while Skyrim is running**, because the game would overwrite them on exit.
+- Paths are checked so nothing outside the game folder can ever be moved, including by a malicious mod archive.
 - Your Nexus API key is stored encrypted (Windows secure storage, or your Linux keyring) and only sent to `nexusmods.com`.
 
 <details>
@@ -84,10 +85,10 @@ The app finds Skyrim through Steam. If it doesn't, point it at the folder that c
 
 1. **Everyone:** open STR Companion and go through the **Dashboard** until everything is green or yellow.
 2. **Everyone:** **Cleanup → Move Anniversary add-ons to backup**, unless you all own and enable exactly the same ones.
-3. **Everyone:** **Friends Sync**. Post your code in your group chat, then paste each friend's code. Fix anything marked **Fix**.
+3. **Everyone:** **Friends Sync**. Post your code in your group chat, then paste the host's code and click **Match their load order**. Install anything listed as missing, and save friends to your party.
 4. **Host:** **Config Editor → Skyrim Together server → Story Co-op (3 players)**, then set a join password.
 5. **Host:** **Play & Server → Start server**. Share your `IP:port` (forward the port on your router, or use Tailscale or ZeroTier).
-6. **Everyone:** **Backups → Snapshot saves now**, then **Launch Skyrim Together** and connect with **F2**.
+6. **Everyone:** **Launch Skyrim Together** (saves are snapshotted automatically first) and connect with **F2**. The host can use **Copy invite** to share the address and password.
 7. Pick **one party leader** for the whole campaign. Quest progress syncs from them.
 
 ## 🔑 Nexus Mods integration

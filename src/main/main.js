@@ -18,19 +18,28 @@ const mods = require('../core/mods');
 const { BackupStore } = require('../core/backup');
 const { Installer, ARCHIVE_EXT } = require('../core/installer');
 const { Nexus, modUrl, parseModRef, download } = require('../core/nexus');
+const { IniDoc } = require('../core/ini');
 
 let win;
 const appDataDir = () => app.getPath('userData');
 const settingsFile = () => path.join(appDataDir(), 'settings.json');
 
+const DEFAULT_SETTINGS = {
+  gameDir: null, playerName: os.userInfo().username, customMods: [], checklist: {}, party: [],
+  autoSnapshot: true, keepAutoSnapshots: 10,
+};
+
 function loadSettings() {
-  const s = util.readJson(settingsFile(), { gameDir: null, playerName: os.userInfo().username, customMods: [], checklist: {} });
+  const s = { ...DEFAULT_SETTINGS, ...util.readJson(settingsFile(), {}) };
   // Tests and CI point the app at a fake game folder without touching saved settings.
   if (process.env.STRC_GAME_DIR) s.gameDir = process.env.STRC_GAME_DIR;
   return s;
 }
 function saveSettings(s) {
-  util.writeJson(settingsFile(), s);
+  const out = { ...s };
+  // Never persist the test override as the user's real game folder.
+  if (process.env.STRC_GAME_DIR) out.gameDir = (util.readJson(settingsFile(), {}) || {}).gameDir || null;
+  util.writeJson(settingsFile(), out);
 }
 function updateSettings(patch) {
   const s = { ...loadSettings(), ...patch };
@@ -38,10 +47,30 @@ function updateSettings(patch) {
   return s;
 }
 
+// Decrypting goes through the OS keyring, so keep the key in memory instead of decrypting per request.
+let nexusKeyCache;
 function nexusKey() {
+  if (nexusKeyCache !== undefined) return nexusKeyCache;
   const s = loadSettings();
-  if (!s.nexusKeyEnc) return null;
-  try { return safeStorage.decryptString(Buffer.from(s.nexusKeyEnc, 'base64')); } catch { return null; }
+  nexusKeyCache = null;
+  if (s.nexusKeyEnc) {
+    try { nexusKeyCache = safeStorage.decryptString(Buffer.from(s.nexusKeyEnc, 'base64')); } catch {}
+  }
+  return nexusKeyCache;
+}
+
+/** GET a small text resource with a timeout (public IP, GitHub release info). */
+function fetchText(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'STR-Companion', ...headers } }, res => {
+      let b = '';
+      res.setEncoding('utf8');
+      res.on('data', d => { b += d; if (b.length > 1 << 20) req.destroy(new Error('Response too large')); });
+      res.on('end', () => resolve({ status: res.statusCode, body: b }));
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => req.destroy(new Error('Network request timed out')));
+  });
 }
 
 function ctx() {
@@ -82,7 +111,8 @@ handle('app:init', async () => {
   const s = loadSettings();
   // Scanning Steam libraries spawns reg.exe; once per run is enough.
   const detected = detectedCache || (detectedCache = await game.detectGameDirs());
-  if (!s.gameDir && detected.length) { s.gameDir = detected[0]; saveSettings(s); }
+  // No folder yet, or the saved one is gone (game moved to another library): use what Steam reports.
+  if ((!s.gameDir || !game.isGameDir(s.gameDir)) && detected.length) { s.gameDir = detected[0]; saveSettings(s); }
   const valid = !!s.gameDir && game.isGameDir(s.gameDir);
   if (valid) adoptLegacyBackups(ctx());
   return {
@@ -102,24 +132,32 @@ handle('game:pickDir', async () => {
   return dir;
 });
 
+const PUBLIC_SETTINGS = ['playerName', 'checklist', 'autoSnapshot', 'keepAutoSnapshots'];
 handle('settings:set', patch => {
   const allowed = {};
-  for (const k of ['playerName', 'checklist']) if (k in patch) allowed[k] = patch[k];
+  for (const k of PUBLIC_SETTINGS) if (k in patch) allowed[k] = patch[k];
+  if ('keepAutoSnapshots' in allowed) allowed.keepAutoSnapshots = Math.max(1, Math.min(100, Number(allowed.keepAutoSnapshots) || 10));
   const s = updateSettings(allowed);
-  return { playerName: s.playerName, checklist: s.checklist || {} };
+  return Object.fromEntries(PUBLIC_SETTINGS.map(k => [k, s[k]]));
 });
 
 // ---------- dashboard ----------
+function currentVersions(snap) {
+  return { game: snap.gameVersion, str: snap.str.version };
+}
+
 handle('health:get', () => {
   const c = ctx();
   const snap = health.snapshot(c.paths);
+  // First run: remember today's versions so a later Steam update can be spotted.
+  if (!c.s.lastSeen && snap.gameVersion) updateSettings({ lastSeen: currentVersions(snap) });
   return {
     snapshot: {
       gameVersion: snap.gameVersion, skse: snap.skse, addressLibrary: snap.addressLibrary, str: snap.str,
       manager: snap.manager, pluginCount: snap.loadOrder.length, autoUpdate: snap.autoUpdate,
       ccRemovable: snap.cc.removable.length, ccKeep: snap.cc.keep.length,
     },
-    checks: health.checks(c.paths, snap, c.backups),
+    checks: health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen, crashAck: c.s.crashAck, clientCrashAck: c.s.clientCrashAck === snap.client.updatedAt }),
   };
 });
 
@@ -137,6 +175,13 @@ handle('fix:run', async fix => {
       return { restored };
     }
     case 'steamUpdateOnLaunch': await launch.setSteamAutoUpdate(c.paths, 1); return { done: true };
+    case 'ackVersions': updateSettings({ lastSeen: currentVersions(health.snapshot(c.paths)) }); return { done: true };
+    case 'activatePlugins': {
+      const names = (fix.names || []).filter(n => plugins.PLUGIN_RE.test(n));
+      c.backups.snapshotConfig(util.resolveCI(c.paths.localAppDir, 'Plugins.txt'));
+      plugins.addToPluginsTxt(c.paths.localAppDir, names);
+      return { done: true };
+    }
     default: throw new Error(`Unknown fix ${fix.action}`);
   }
 });
@@ -175,7 +220,9 @@ handle('cleanup:setActive', (name, active) => {
 
 // ---------- backups ----------
 handle('backups:list', () => ctx().backups.list());
+handle('backups:usage', () => ctx().backups.usage());
 handle('backups:restore', (id, rels) => ctx().backups.restore(id, rels || null));
+handle('backups:delete', id => ctx().backups.deleteBatch(id));
 handle('backups:open', () => {
   const c = ctx();
   fs.mkdirSync(c.backups.root, { recursive: true });
@@ -259,10 +306,16 @@ handle('mods:install', async id => {
   const file = await mods.bestFile(c.nexus, id);
   if (!file) throw new Error('No main file found on Nexus for this mod.');
   const links = await c.nexus.downloadLinks(id, file.file_id);
-  const dest = path.join(appDataDir(), 'downloads', file.file_name);
+  if (!links || !links[0] || !/^https:/.test(links[0].URI)) throw new Error('Nexus did not return a download link.');
+  // The file name comes from the server; never let it pick a folder.
+  const dest = path.join(appDataDir(), 'downloads', path.basename(String(file.file_name || `${id}.7z`)));
   await download(links[0].URI, dest, p => send('progress', { id, p }));
-  const info = await c.nexus.mod(id);
-  return c.installer.installArchive(dest, { name: info.name, nexusId: id, version: file.version || info.version });
+  try {
+    const info = await c.nexus.mod(id);
+    return await c.installer.installArchive(dest, { name: info.name, nexusId: id, version: file.version || info.version });
+  } finally {
+    fs.rm(dest, { force: true }, () => {});
+  }
 });
 handle('mods:pickArchive', async () => {
   const r = await dialog.showOpenDialog(win, { title: 'Pick a mod archive', properties: ['openFile'], filters: [{ name: 'Mod archives', extensions: ['7z', 'zip', 'rar'] }] });
@@ -303,10 +356,11 @@ handle('downloads:stop', () => { clearInterval(watchTimer); return true; });
 // ---------- Nexus key ----------
 handle('nexus:setKey', async key => {
   key = String(key || '').trim();
-  if (!key) { updateSettings({ nexusKeyEnc: null }); return { cleared: true }; }
+  if (!key) { updateSettings({ nexusKeyEnc: null }); nexusKeyCache = null; return { cleared: true }; }
   const user = await new Nexus(key).validate();
   if (!safeStorage.isEncryptionAvailable()) throw new Error(process.platform === 'win32' ? 'Windows secure storage is unavailable, so the key cannot be saved safely.' : 'No system keyring is available (install gnome-keyring or KWallet), so the key cannot be saved safely.');
   updateSettings({ nexusKeyEnc: safeStorage.encryptString(key).toString('base64') });
+  nexusKeyCache = key;
   return { name: user.name, premium: !!user.is_premium };
 });
 handle('nexus:status', async () => {
@@ -320,10 +374,21 @@ handle('nexus:openKeyPage', () => shell.openExternal('https://next.nexusmods.com
 // ---------- play / server ----------
 handle('launch:status', () => launch.status());
 handle('launch:client', async () => {
+  const c = ctx();
   const st = await launch.status();
+  if (st.game || st.client) throw new Error('Skyrim is already running.');
+  // A copy of the saves before every session, so a bad sync or crash can always be undone.
+  let snapshot = null;
+  if (c.s.autoSnapshot && util.walkFiles(c.paths.saves).length) {
+    try {
+      snapshot = await c.backups.snapshotSaves('Automatic, before launch', { auto: true, keepAuto: c.s.keepAutoSnapshots });
+    } catch (e) {
+      snapshot = { error: e.message };
+    }
+  }
   if (!st.steam) launch.openSteam();
-  launch.launchClient(ctx().paths);
-  return { steamStarted: !st.steam };
+  launch.launchClient(c.paths);
+  return { steamStarted: !st.steam, snapshot };
 });
 handle('launch:server', () => { launch.launchServer(ctx().paths); return true; });
 handle('launch:stopServer', () => launch.stopServer());
@@ -337,6 +402,7 @@ handle('launch:restartServer', async () => {
 // ---------- save snapshots ----------
 handle('saves:list', () => ctx().backups.listSaveSnapshots());
 handle('saves:snapshot', note => ctx().backups.snapshotSaves(note || ''));
+handle('saves:delete', id => ctx().backups.deleteSaveSnapshot(id));
 handle('saves:restore', async id => {
   const st = await launch.status();
   if (st.game || st.client) throw new Error('Close Skyrim before restoring saves.');
@@ -346,29 +412,26 @@ handle('saves:open', () => shell.openPath(ctx().paths.saves));
 
 // ---------- app updates (GitHub releases) ----------
 const REPO = 'clawdroppin/str-companion';
-handle('app:checkUpdate', () => new Promise((resolve, reject) => {
-  https.get(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { 'User-Agent': 'STR-Companion', Accept: 'application/vnd.github+json' } }, res => {
-    let b = '';
-    res.on('data', d => { b += d; });
-    res.on('end', () => {
-      if (res.statusCode === 404) return resolve({ hasUpdate: false });
-      try {
-        const rel = JSON.parse(b);
-        const latest = String(rel.tag_name || '').replace(/^v/, '');
-        resolve({ latest, url: rel.html_url, hasUpdate: !!latest && util.compareVersions(latest, app.getVersion()) > 0 });
-      } catch (e) { reject(e); }
-    });
-  }).on('error', reject);
-}));
+handle('app:checkUpdate', async () => {
+  const r = await fetchText(`https://api.github.com/repos/${REPO}/releases/latest`, { Accept: 'application/vnd.github+json' });
+  if (r.status !== 200) return { hasUpdate: false };
+  const rel = JSON.parse(r.body);
+  const latest = String(rel.tag_name || '').replace(/^v/, '');
+  const url = /^https:\/\/github\.com\//.test(rel.html_url) ? rel.html_url : `https://github.com/${REPO}/releases/latest`;
+  return { latest, url, hasUpdate: !!latest && util.compareVersions(latest, app.getVersion()) > 0 };
+});
 handle('server:session', () => logs.serverSession(ctx().paths));
 handle('net:info', () => {
   const ips = [];
   for (const list of Object.values(os.networkInterfaces())) for (const i of list || []) if (i.family === 'IPv4' && !i.internal) ips.push(i.address);
   return { local: ips };
 });
-handle('net:publicIp', () => new Promise((resolve, reject) => {
-  https.get('https://api.ipify.org', res => { let b = ''; res.on('data', d => { b += d; }); res.on('end', () => resolve(b.trim())); }).on('error', reject);
-}));
+handle('net:publicIp', async () => {
+  const r = await fetchText('https://api.ipify.org');
+  const ip = r.body.trim();
+  if (r.status !== 200 || !/^[\d.]+$|^[0-9a-f:]+$/i.test(ip)) throw new Error("Couldn't look up your public IP right now.");
+  return ip;
+});
 
 // ---------- logs ----------
 handle('logs:list', () => logs.logFiles(ctx().paths));
@@ -380,24 +443,136 @@ handle('logs:open', id => {
   const f = logs.logFiles(ctx().paths).find(l => l.id === id);
   return f && f.exists ? shell.openPath(f.file) : null;
 });
+handle('logs:crashes', () => {
+  const c = ctx();
+  const order = plugins.effectiveLoadOrder(c.paths.gameDir, c.paths.localAppDir).order.map(p => p.name);
+  const client = logs.clientLog(c.paths);
+  return {
+    reports: logs.crashReports(c.paths, order),
+    clientCrashed: client.crashed,
+    clientLogAt: client.updatedAt,
+    ack: c.s.crashAck || null,
+  };
+});
+handle('logs:openCrash', file => {
+  // Only open files that really are crash logs we listed.
+  const hit = logs.crashFiles(ctx().paths).find(f => f.file === file);
+  return hit ? shell.openPath(hit.file) : null;
+});
+handle('logs:ackCrashes', () => {
+  const c = ctx();
+  updateSettings({ crashAck: new Date().toISOString(), clientCrashAck: logs.clientLog(c.paths).updatedAt });
+  return true;
+});
 
 // ---------- friends sync ----------
-function mySetup(c) {
-  const snap = health.snapshot(c.paths);
+/** Nexus ids of the mods my plugins came from (Vortex or this app), so friends get download links. */
+function nexusIdsFor(c, pluginNames) {
+  const want = new Set(pluginNames.map(n => n.toLowerCase()));
+  const ids = {};
+  for (const m of game.vortexMods(c.paths)) {
+    if (!m.nexusId) continue;
+    for (const f of m.files) {
+      const base = path.basename(f);
+      if (want.has(base.toLowerCase())) ids[base] = m.nexusId;
+    }
+  }
+  for (const r of Object.values(c.installer.registry())) {
+    if (!r.nexusId) continue;
+    for (const p of r.plugins || []) if (want.has(p.toLowerCase())) ids[p] = r.nexusId;
+  }
+  return ids;
+}
+
+function mySetup(c, snap = health.snapshot(c.paths)) {
+  const pluginNames = snap.loadOrder.map(p => p.name);
   return {
     playerName: c.s.playerName,
     gameVersion: snap.gameVersion,
     strVersion: snap.str.version,
     skseVersion: snap.skse.installed ? snap.skse.version : null,
     addressLibrary: snap.addressLibrary.matchesGame,
-    plugins: snap.loadOrder.map(p => p.name),
+    plugins: pluginNames,
     sksePlugins: snap.sksePlugins,
+    nexusIds: nexusIdsFor(c, pluginNames),
   };
 }
+
+function localPlugins(c, snap) {
+  return {
+    onDisk: [...snap.loadOrder.map(p => p.name), ...snap.inactive],
+    implicit: snap.loadOrder.filter(p => p.source !== 'plugins.txt').map(p => p.name),
+  };
+}
+
 handle('share:mine', () => { const m = mySetup(ctx()); return { code: share.makeCode(m), setup: m }; });
 handle('share:compare', code => {
+  const c = ctx();
+  const snap = health.snapshot(c.paths);
+  const mine = mySetup(c, snap);
   const theirs = share.parseCode(code);
-  return { theirs, diffs: share.compare(mySetup(ctx()), theirs) };
+  return { theirs, diffs: share.compare(mine, theirs), plan: share.matchPlan(mine, theirs, localPlugins(c, snap)) };
+});
+
+/** Rewrites Plugins.txt to match a friend's load order. Plugins.txt is snapshotted first; nothing is deleted. */
+handle('share:applyMatch', async code => {
+  const c = ctx();
+  const st = await launch.status();
+  if (st.game || st.client) throw new Error('Close Skyrim first — it rewrites Plugins.txt when it exits.');
+  const snap = health.snapshot(c.paths);
+  const theirs = share.parseCode(code);
+  const plan = share.matchPlan(mySetup(c, snap), theirs, localPlugins(c, snap));
+  const file = util.resolveCI(c.paths.localAppDir, 'Plugins.txt');
+  const snapshot = c.backups.snapshotConfig(file);
+  plugins.applyLoadOrder(c.paths.gameDir, c.paths.localAppDir, plan.order);
+  return { ...plan, snapshot, manager: snap.manager };
+});
+
+// Party roster: friends' setup codes kept between sessions, re-checked against my setup on every visit.
+handle('party:list', () => {
+  const c = ctx();
+  const snap = health.snapshot(c.paths);
+  const mine = mySetup(c, snap);
+  return (c.s.party || []).map(m => {
+    try {
+      const theirs = share.parseCode(m.code);
+      const diffs = share.compare(mine, theirs);
+      return { ...m, theirs: { ...theirs, plugins: theirs.plugins.length }, errors: diffs.filter(d => d.level === 'error').length, warnings: diffs.filter(d => d.level !== 'error').length };
+    } catch (e) {
+      return { ...m, invalid: e.message };
+    }
+  });
+});
+handle('party:save', code => {
+  const theirs = share.parseCode(code);
+  const s = loadSettings();
+  const name = (theirs.playerName || 'Friend').slice(0, 40);
+  const party = (s.party || []).filter(m => m.name !== name);
+  party.push({ name, code: String(code).trim(), savedAt: new Date().toISOString() });
+  updateSettings({ party });
+  return { name };
+});
+handle('party:remove', name => {
+  const s = loadSettings();
+  updateSettings({ party: (s.party || []).filter(m => m.name !== name) });
+  return true;
+});
+
+/** A ready-to-paste invite for the group chat: address, password and my setup code. */
+handle('share:invite', publicIp => {
+  const c = ctx();
+  const ini = new IniDoc(util.readText(game.strInfo(c.paths).configFile, ''));
+  const port = ini.get('GameServer', 'uPort') || '10578';
+  const password = ini.get('GameServer', 'sPassword') || '';
+  const code = share.makeCode(mySetup(c));
+  const ip = /^[\d.]+$|^[0-9a-f:]+$/i.test(String(publicIp || '')) ? publicIp : '<my IP>';
+  return [
+    'Skyrim Together tonight!',
+    `Server: ${ip}:${port}`,
+    password ? `Password: ${password}` : 'No password',
+    'Paste my setup code into STR Companion (Friends Sync) to check your mods match:',
+    code,
+  ].join('\n');
 });
 
 // ---------- misc ----------
@@ -443,14 +618,26 @@ function captureAllPages(dir) {
     fs.mkdirSync(dir, { recursive: true });
     await wait(1500);
     const report = {};
-    for (const p of pages) {
+    // Extra steps exercise flows, not just pages: a crash-report tab, and comparing my own setup code.
+    const extra = {
+      'logs:crashes': `document.querySelector('#logTabs [data-tab="crashes"]').click()`,
+      // STRC_COMPARE_CODE lets a test compare against a different friend; otherwise my own code is used.
+      'friends:compare': `document.querySelector('#theirCode').value = ${JSON.stringify(process.env.STRC_COMPARE_CODE || '')} || document.querySelector('.copyable code').textContent; document.querySelector('#compare').click()`,
+    };
+    const steps = [...pages, ...Object.keys(extra)];
+    for (const step of steps) {
+      const [p] = step.split(':');
       await win.webContents.executeJavaScript(`document.querySelector('#nav [data-page="${p}"]').click()`);
+      if (extra[step]) {
+        await wait(1200);
+        await win.webContents.executeJavaScript(extra[step]);
+      }
       await wait(1800);
       win.webContents.invalidate();
       await wait(200);
       const img = await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
-      fs.writeFileSync(path.join(dir, `${p}.png`), img.toPNG());
-      report[p] = await win.webContents.executeJavaScript(`({ h1: document.querySelector('main h1')?.textContent, error: document.querySelector('main .render-error')?.textContent || null })`);
+      fs.writeFileSync(path.join(dir, `${step.replace(":", "-")}.png`), img.toPNG());
+      report[step] = await win.webContents.executeJavaScript(`({ h1: document.querySelector('main h1')?.textContent, error: document.querySelector('main .render-error')?.textContent || null })`);
     }
     fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2));
     app.quit();

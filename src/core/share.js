@@ -1,9 +1,12 @@
 'use strict';
 const zlib = require('zlib');
 
-const PREFIX = 'STR1-';
+const PREFIX = 'STR2-';
 
-/** A compact, pasteable summary of everything that has to match between co-op players. */
+/**
+ * A compact, pasteable summary of everything that has to match between co-op players.
+ * v2 also carries the Nexus id of each plugin's mod (when known) so friends get download links.
+ */
 function makeCode(snapshot) {
   const payload = {
     n: snapshot.playerName || '',
@@ -13,17 +16,24 @@ function makeCode(snapshot) {
     a: snapshot.addressLibrary ? 1 : 0,
     p: snapshot.plugins,
     k: snapshot.sksePlugins,
+    x: snapshot.nexusIds || {},
   };
   return PREFIX + zlib.deflateRawSync(Buffer.from(JSON.stringify(payload))).toString('base64url');
 }
 
 function parseCode(code) {
   const s = String(code).trim();
-  if (!s.startsWith(PREFIX)) throw new Error('That isn\'t an STR Companion setup code (they start with STR1-).');
-  const p = JSON.parse(zlib.inflateRawSync(Buffer.from(s.slice(PREFIX.length), 'base64url')).toString());
+  const m = s.match(/^STR([12])-([A-Za-z0-9_-]+)$/);
+  if (!m) throw new Error("That isn't an STR Companion setup code. Codes start with STR2- (or STR1- from older versions) — make sure you copied the whole thing.");
+  let p;
+  try {
+    p = JSON.parse(zlib.inflateRawSync(Buffer.from(m[2], 'base64url')).toString());
+  } catch {
+    throw new Error('That setup code is damaged or incomplete — ask your friend to copy it again.');
+  }
   return {
     playerName: p.n, gameVersion: p.g, strVersion: p.t, skseVersion: p.s,
-    addressLibrary: !!p.a, plugins: p.p || [], sksePlugins: p.k || [],
+    addressLibrary: !!p.a, plugins: p.p || [], sksePlugins: p.k || [], nexusIds: p.x || {},
   };
 }
 
@@ -54,4 +64,39 @@ function compare(mine, theirs) {
   return diffs.sort((a, b) => order[a.level] - order[b.level]);
 }
 
-module.exports = { makeCode, parseCode, compare };
+/** True when the plugin lists are identical in content and order (the part Skyrim Together syncs on). */
+function pluginsMatch(mine, theirs) {
+  return mine.plugins.length === theirs.plugins.length
+    && mine.plugins.every((p, i) => p.toLowerCase() === String(theirs.plugins[i]).toLowerCase());
+}
+
+/**
+ * What it takes to make my load order match theirs.
+ * @param mine     my setup (plugins = my effective load order)
+ * @param theirs   their parsed setup code
+ * @param local    { onDisk: all plugin files in my Data, implicit: plugins my game loads on its own }
+ */
+function matchPlan(mine, theirs, local) {
+  const low = s => s.toLowerCase();
+  const onDisk = new Set(local.onDisk.map(low));
+  const implicit = new Set(local.implicit.map(low));
+  const mineActive = new Set(mine.plugins.map(low));
+  const theirSet = new Set(theirs.plugins.map(low));
+
+  const missing = theirs.plugins
+    .filter(p => !onDisk.has(low(p)))
+    .map(p => ({ name: p, nexusId: theirs.nexusIds[p] || theirs.nexusIds[low(p)] || null }));
+  const activate = theirs.plugins.filter(p => onDisk.has(low(p)) && !mineActive.has(low(p)) && !implicit.has(low(p)));
+  const deactivate = mine.plugins.filter(p => !theirSet.has(low(p)) && !implicit.has(low(p)));
+  // Plugins the game loads by itself (Creation Club) can't be switched off in Plugins.txt; they have to be moved.
+  const extraImplicit = mine.plugins.filter(p => !theirSet.has(low(p)) && implicit.has(low(p)));
+  const order = theirs.plugins.filter(p => onDisk.has(low(p)) && !implicit.has(low(p)));
+  const mineOrdered = mine.plugins.filter(p => !implicit.has(low(p)) && theirSet.has(low(p))).map(low);
+  const reorder = order.map(low).filter(p => mineActive.has(p)).join('|') !== mineOrdered.join('|');
+  return {
+    order, missing, activate, deactivate, extraImplicit, reorder,
+    changes: activate.length + deactivate.length + (reorder ? 1 : 0),
+  };
+}
+
+module.exports = { makeCode, parseCode, compare, pluginsMatch, matchPlan };

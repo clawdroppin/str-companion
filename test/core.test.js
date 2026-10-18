@@ -11,6 +11,7 @@ const game = require('../src/core/game');
 const { BackupStore } = require('../src/core/backup');
 const { Installer, analyze, sevenZip } = require('../src/core/installer');
 const share = require('../src/core/share');
+const logs = require('../src/core/logs');
 const configs = require('../src/core/configs');
 const cleanup = require('../src/core/cleanup');
 const health = require('../src/core/health');
@@ -174,19 +175,33 @@ test('updating an app-installed mod replaces its own files and backs up only dro
   assert.strictEqual(fs.readFileSync(path.join(paths.dataDir, 'textures', 'shared.dds'), 'utf8'), 'vanilla');
 });
 
-test('save snapshots copy, list and restore with a safety snapshot', () => {
+test('save snapshots copy, list and restore with a safety snapshot', async () => {
   const { paths } = fakeGame();
   fs.mkdirSync(paths.saves, { recursive: true });
   fs.writeFileSync(path.join(paths.saves, 'Save1.ess'), 'one');
   const store = new BackupStore(paths);
-  const s = store.snapshotSaves('test');
+  const s = await store.snapshotSaves('test');
   assert.strictEqual(s.files, 1);
   fs.writeFileSync(path.join(paths.saves, 'Save1.ess'), 'broken');
-  const r = store.restoreSaveSnapshot(s.id);
+  const r = await store.restoreSaveSnapshot(s.id);
   assert.strictEqual(r.restored, 1);
   assert.ok(r.safety);
   assert.strictEqual(fs.readFileSync(path.join(paths.saves, 'Save1.ess'), 'utf8'), 'one');
   assert.strictEqual(store.listSaveSnapshots().length, 2);
+  await assert.rejects(store.restoreSaveSnapshot('../../evil'), /not found/);
+});
+
+test('automatic save snapshots are pruned, manual ones kept', async () => {
+  const { paths } = fakeGame();
+  const store = new BackupStore(paths);
+  await store.snapshotSaves('manual');
+  for (let i = 0; i < 4; i++) await store.snapshotSaves('auto', { auto: true, keepAuto: 2 });
+  const list = store.listSaveSnapshots();
+  assert.strictEqual(list.filter(x => x.auto).length, 2);
+  assert.strictEqual(list.filter(x => !x.auto).length, 1);
+  store.deleteSaveSnapshot(list[0].id);
+  assert.strictEqual(store.listSaveSnapshots().length, 2);
+  assert.ok(store.usage().saves > 0);
 });
 
 test('new ini files get Windows line endings', () => {
@@ -196,9 +211,14 @@ test('new ini files get Windows line endings', () => {
 });
 
 test('setup codes round-trip and report differences', () => {
-  const mine = { playerName: 'A', gameVersion: '1.7.104', strVersion: '1.8.3', skseVersion: '2.3.1', addressLibrary: true, plugins: ['Skyrim.esm', 'USSEP.esp', 'X.esp'], sksePlugins: ['EngineFixes.dll'] };
+  const mine = { playerName: 'A', gameVersion: '1.7.104', strVersion: '1.8.3', skseVersion: '2.3.1', addressLibrary: true, plugins: ['Skyrim.esm', 'USSEP.esp', 'X.esp'], sksePlugins: ['EngineFixes.dll'], nexusIds: { 'USSEP.esp': 266 } };
   const code = share.makeCode(mine);
-  assert.match(code, /^STR1-/);
+  assert.match(code, /^STR2-/);
+  assert.throws(() => share.parseCode('STR2-garbage!!'), /isn't an STR Companion setup code/);
+  assert.throws(() => share.parseCode('STR2-AAAA'), /damaged/);
+  // Codes from 1.1.x (STR1, no Nexus ids) still parse.
+  const v1 = 'STR1-' + require('zlib').deflateRawSync(Buffer.from(JSON.stringify({ n: 'B', g: '1', p: ['Skyrim.esm'] }))).toString('base64url');
+  assert.deepStrictEqual(share.parseCode(v1).nexusIds, {});
   assert.deepStrictEqual(share.parseCode(code), mine);
   assert.deepStrictEqual(share.compare(mine, mine), []);
   const theirs = { ...mine, gameVersion: '1.6.1170', plugins: ['Skyrim.esm', 'USSEP.esp'], sksePlugins: [] };
@@ -271,8 +291,10 @@ test('case-insensitive files: lowercase plugins.txt and data folder still work',
 
 test('resolveCI and parsePsOutput', () => {
   const { paths } = fakeGame();
-  assert.strictEqual(util.resolveCI(paths.gameDir, 'DATA', 'skse', 'PLUGINS'), path.join(paths.gameDir, 'Data', 'SKSE', 'Plugins'));
-  assert.strictEqual(util.resolveCI(paths.gameDir, 'NotThere', 'x'), path.join(paths.gameDir, 'NotThere', 'x'));
+  assert.strictEqual(util.resolveCIStrict(paths.gameDir, 'DATA', 'skse', 'PLUGINS'), path.join(paths.gameDir, 'Data', 'SKSE', 'Plugins'));
+  assert.strictEqual(util.resolveCIStrict(paths.gameDir, 'NotThere', 'x'), path.join(paths.gameDir, 'NotThere', 'x'));
+  assert.ok(util.isInside(paths.gameDir, path.join(paths.gameDir, 'Data', 'x.esp')));
+  assert.ok(!util.isInside(paths.gameDir, path.join(paths.gameDir, '..', 'evil.txt')));
   const names = util.parsePsOutput([
     '/home/me/.local/share/Steam/ubuntu12_32/steam -srt-logger-opened',
     String.raw`Z:\home\me\.local\share\Steam\steamapps\common\Skyrim Special Edition\SkyrimSE.exe`,
@@ -290,4 +312,149 @@ test('Linux: bundled 7-Zip without the executable bit still runs', { skip: proce
   const exe = executableCopy(copy);
   const r = await run(exe, ['i']);
   assert.ok(r.ok, r.stderr);
+});
+
+// ---------- 1.2.0: bug fixes ----------
+
+test('version compare understands letter suffixes', () => {
+  assert.strictEqual(util.compareVersions('4.3.9c', '4.3.9b'), 1);
+  assert.strictEqual(util.compareVersions('4.3.9', '4.3.9c'), -1);
+  assert.strictEqual(util.compareVersions('4.3.10', '4.3.9c'), 1);
+  assert.strictEqual(util.compareVersions('v1.2.0', '1.2.0'), 0);
+  assert.strictEqual(util.compareVersions('1.10.0', '1.9.9'), 1);
+});
+
+test('.esm without the master flag still loads with the masters', () => {
+  const { paths } = fakeGame();
+  fs.writeFileSync(path.join(paths.dataDir, 'Unflagged.esm'), pluginBytes(['Skyrim.esm'], 0));
+  fs.appendFileSync(path.join(paths.localAppDir, 'Plugins.txt'), '*Unflagged.esm\r\n');
+  const { order } = plugins.effectiveLoadOrder(paths.gameDir, paths.localAppDir);
+  const names = order.map(o => o.name);
+  assert.ok(names.indexOf('Unflagged.esm') < names.indexOf('USSEP.esp'));
+});
+
+test('plugin headers with an XXXX oversized field parse correctly', () => {
+  const { paths } = fakeGame();
+  const big = Buffer.alloc(70000, 0x41);
+  const parts = [];
+  const sub = (type, data, len = data.length) => {
+    const h = Buffer.alloc(6);
+    h.write(type, 0, 'latin1');
+    h.writeUInt16LE(len & 0xffff, 4);
+    parts.push(h, data);
+  };
+  sub('HEDR', Buffer.alloc(12));
+  sub('MAST', Buffer.from('Skyrim.esm\0', 'latin1'));
+  sub('DATA', Buffer.alloc(8));
+  const xx = Buffer.alloc(4);
+  xx.writeUInt32LE(big.length, 0);
+  sub('XXXX', xx);
+  sub('ONAM', big, 0);
+  sub('SNAM', Buffer.from('after big field\0', 'latin1'));
+  const body = Buffer.concat(parts);
+  const head = Buffer.alloc(24);
+  head.write('TES4', 0, 'latin1');
+  head.writeUInt32LE(body.length, 4);
+  head.writeUInt32LE(1, 8);
+  const file = path.join(paths.dataDir, 'Big.esm');
+  fs.writeFileSync(file, Buffer.concat([head, body]));
+  const h = plugins.readHeader(file);
+  assert.deepStrictEqual(h.masters, ['Skyrim.esm']);
+  assert.strictEqual(h.description, 'after big field');
+});
+
+test('backups refuse paths outside the game folder', () => {
+  const { root, paths } = fakeGame();
+  fs.writeFileSync(path.join(root, 'outside.txt'), 'keep me');
+  const store = new BackupStore(paths);
+  const r = store.backup(['../../../outside.txt', '_STRCompanion_Backup/manifest.json']);
+  assert.strictEqual(r.moved, 0);
+  assert.strictEqual(r.errors.length, 2);
+  assert.ok(fs.existsSync(path.join(root, 'outside.txt')));
+});
+
+test('restore drops files deleted from the backup by hand; batches can be deleted', () => {
+  const { paths } = fakeGame();
+  const store = new BackupStore(paths);
+  const { id } = store.backup(['Data/USSEP.esp', 'Data/USSEP - Textures.bsa']);
+  fs.unlinkSync(path.join(store.root, id, 'Data', 'USSEP - Textures.bsa'));
+  const r = store.restore(id);
+  assert.strictEqual(r.restored, 1);
+  assert.strictEqual(r.missing, 1);
+  assert.strictEqual(store.list().length, 0, 'batch finished');
+  const b = store.backup(['Data/Addon.esp']);
+  store.deleteBatch(b.id);
+  assert.strictEqual(store.list().length, 0);
+  assert.ok(!fs.existsSync(path.join(store.root, b.id)));
+});
+
+// ---------- 1.2.0: features ----------
+
+test('load-order match plan and applying it', () => {
+  const { paths } = fakeGame();
+  fs.writeFileSync(path.join(paths.dataDir, 'Extra.esp'), pluginBytes(['Skyrim.esm']));
+  fs.writeFileSync(path.join(paths.dataDir, 'Inactive.esp'), pluginBytes(['Skyrim.esm']));
+  fs.appendFileSync(path.join(paths.localAppDir, 'Plugins.txt'), '*Extra.esp\r\nInactive.esp\r\n');
+  const lo = plugins.effectiveLoadOrder(paths.gameDir, paths.localAppDir);
+  const mine = { plugins: lo.order.map(p => p.name) };
+  const implicit = lo.order.filter(p => p.source !== 'plugins.txt').map(p => p.name);
+  const theirs = {
+    plugins: [...implicit.filter(n => !/ExoticArrows/i.test(n)), 'SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp', 'Inactive.esp', 'USSEP.esp', 'Addon.esp', 'NotHere.esp'],
+    nexusIds: { 'NotHere.esp': 123 },
+  };
+  const onDisk = [...lo.order.map(p => p.name), ...lo.inactive];
+  const plan = share.matchPlan(mine, theirs, { onDisk, implicit });
+  assert.deepStrictEqual(plan.missing, [{ name: 'NotHere.esp', nexusId: 123 }]);
+  assert.deepStrictEqual(plan.activate, ['Inactive.esp']);
+  assert.deepStrictEqual(plan.deactivate, ['Extra.esp']);
+  assert.deepStrictEqual(plan.extraImplicit, ['ccBGSSSE002-ExoticArrows.esl']);
+  assert.ok(plan.reorder);
+
+  plugins.applyLoadOrder(paths.gameDir, paths.localAppDir, plan.order);
+  const after = plugins.effectiveLoadOrder(paths.gameDir, paths.localAppDir).order
+    .filter(p => p.source === 'plugins.txt').map(p => p.name);
+  assert.deepStrictEqual(after, ['SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp', 'Inactive.esp', 'USSEP.esp', 'Addon.esp']);
+  assert.match(fs.readFileSync(path.join(paths.localAppDir, 'Plugins.txt'), 'utf8'), /^Extra\.esp\r?$/m, 'extra plugin kept but switched off');
+  assert.ok(share.pluginsMatch({ plugins: ['A.esp', 'b.esp'] }, { plugins: ['a.esp', 'B.esp'] }));
+});
+
+test('crash logs are summarized with likely culprits', () => {
+  const { paths } = fakeGame();
+  fs.mkdirSync(paths.skseLogs, { recursive: true });
+  fs.writeFileSync(path.join(paths.skseLogs, 'crash-2026-10-18-10-00-00.log'), [
+    'Skyrim SSE v1.6.1170',
+    'Unhandled exception "EXCEPTION_ACCESS_VIOLATION" at 0x7FF71234 SkyrimSE.exe+0123456',
+    '',
+    'PROBABLE CALL STACK:',
+    '\t[0] 0x7FF71234 SkyrimSE.exe+0123456',
+    '\t[1] 0x7FFA0001 BadMod.dll+0001234',
+    '\t[2] 0x7FFA0002 BadMod.dll+0005678',
+    '\t[3] 0x7FFA0003 KERNELBASE.dll+0000001',
+    '',
+    'POSSIBLE RELEVANT OBJECTS:',
+    '\tFile: "Addon.esp" Modified by: USSEP.esp -> Addon.esp',
+    '',
+    'PLUGINS:',
+    '\t[00] Skyrim.esm', '\t[01] USSEP.esp', '\t[02] Addon.esp', '\t[03] MyAddon.esp',
+  ].join('\n'));
+  const [c] = logs.crashReports(paths, ['Skyrim.esm', 'USSEP.esp', 'Addon.esp', 'MyAddon.esp']);
+  assert.match(c.exception, /EXCEPTION_ACCESS_VIOLATION at SkyrimSE\.exe\+0123456/);
+  assert.deepStrictEqual(c.modules, [{ name: 'BadMod.dll', count: 2 }]);
+  assert.deepStrictEqual(c.plugins[0], { name: 'Addon.esp', count: 2 });
+  assert.ok(!c.plugins.some(p => p.name === 'MyAddon.esp'), 'the full plugin list at the end is ignored');
+  const snap = health.snapshot(paths);
+  assert.ok(health.checks(paths, snap, null).some(x => /Skyrim crashed/.test(x.title)));
+  assert.ok(!health.checks(paths, snap, null, { crashAck: '2999-01-01' }).some(x => /Skyrim crashed/.test(x.title)));
+});
+
+test('health flags switched-off STR plugins, game updates and plugin counts', () => {
+  const { paths } = fakeGame();
+  plugins.removeFromLists(paths.localAppDir, ['SkyrimTogether.esp']);
+  const snap = health.snapshot(paths);
+  assert.deepStrictEqual(snap.strPluginsOff, ['SkyrimTogether.esp']);
+  const list = health.checks(paths, snap, null, { lastSeen: { game: '1.6.640', str: '1.8.3' } });
+  const off = list.find(x => /switched off/.test(x.title));
+  assert.strictEqual(off.fix.action, 'activatePlugins');
+  assert.ok(list.some(x => /updated from 1\.6\.640 to 1\.6\.1170/.test(x.title)));
+  assert.ok(snap.counts.full > 0 && snap.counts.light > 0);
 });

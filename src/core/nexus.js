@@ -95,11 +95,14 @@ function download(url, dest, onProgress) {
         let got = 0;
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         const out = fs.createWriteStream(dest);
+        // A half-written archive would fail to extract later with a confusing error, so remove it.
+        const fail = err => { out.destroy(); fs.rm(dest, { force: true }, () => reject(err)); };
         res.on('data', c => { got += c.length; if (total && onProgress) onProgress(got / total); });
+        res.on('aborted', () => fail(new Error('Download was interrupted')));
         res.pipe(out);
-        out.on('finish', () => out.close(() => resolve(dest)));
-        out.on('error', reject);
-      }).on('error', reject);
+        out.on('finish', () => out.close(() => (total && got < total ? fail(new Error('Download was incomplete')) : resolve(dest))));
+        out.on('error', fail);
+      }).on('error', reject).setTimeout(60000, function () { this.destroy(new Error('Download timed out')); });
     };
     get(url, 0);
   });

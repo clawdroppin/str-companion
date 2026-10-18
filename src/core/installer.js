@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exists, readJson, writeJson, run, walkFiles, listDir, which } = require('./util');
+const { exists, readJson, writeJson, run, walkFiles, listDir, which, isInside } = require('./util');
 const plugins = require('./plugins');
 
 const DATA_DIRS = new Set(['meshes', 'textures', 'scripts', 'interface', 'sound', 'music', 'seq', 'skse', 'strings',
@@ -107,7 +107,9 @@ class Installer {
       const files = walkFiles(a.root)
         // Skip installer metadata, and SKSE's bundled source code which the game never uses.
         .filter(f => !/^fomod[\\/]/i.test(f) && !(a.target === 'game' && /^src[\\/]/i.test(f)))
-        .map(f => ({ from: path.join(a.root, f), rel: path.join(prefix, f) }));
+        .map(f => ({ from: path.join(a.root, f), rel: path.join(prefix, f) }))
+        // An archive with "../" entries must not write outside the game folder.
+        .filter(f => isInside(this.paths.gameDir, path.join(this.paths.gameDir, f.rel)));
 
       const key = meta.nexusId ? `nexus-${meta.nexusId}` : `local-${path.basename(archive).replace(ARCHIVE_EXT, '')}`;
       const reg = this.registry();
@@ -126,10 +128,11 @@ class Installer {
       if (overwritten.length) {
         replacedBackups.push(this.backups.backup(overwritten, { label: `Replaced by ${meta.name || path.basename(archive)}`, category: 'overwritten' }).id);
       }
+      // Async copies: texture packs can be gigabytes, and sync copies would freeze the app window.
       for (const f of files) {
         const dest = path.join(this.paths.gameDir, f.rel);
-        fs.mkdirSync(path.dirname(dest), { recursive: true });
-        fs.copyFileSync(f.from, dest);
+        await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+        await fs.promises.copyFile(f.from, dest);
       }
       const newPlugins = files.map(f => f.rel).filter(r => /^data[\\/][^\\/]+\.(esp|esm|esl)$/i.test(r)).map(r => path.basename(r));
       if (newPlugins.length) plugins.addToPluginsTxt(this.paths.localAppDir, newPlugins);

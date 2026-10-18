@@ -5,7 +5,7 @@ const plugins = require('./plugins');
 const cleanup = require('./cleanup');
 const logs = require('./logs');
 const { IniDoc } = require('./ini');
-const { readText } = require('./util');
+const { readText, resolveCI } = require('./util');
 
 /** Everything the dashboard shows, gathered in one pass. */
 function snapshot(paths) {
@@ -28,21 +28,42 @@ function snapshot(paths) {
     knownIssues: cleanup.knownIssues(paths),
     client: logs.clientLog(paths),
     skseResults: logs.sksePluginResults(paths),
+    counts: plugins.pluginCounts(paths.gameDir, lo.order),
+    // Skyrim Together's plugins exist but aren't loaded, e.g. switched off in a mod manager.
+    strPluginsOff: ['SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp']
+      .filter(p => lo.inactive.some(n => n.toLowerCase() === p.toLowerCase())),
+    latestCrash: logs.crashReports(paths, lo.order.map(p => p.name), 1)[0] || null,
   };
 }
 
 /** Turns a snapshot into a checklist with severity and one-click fixes. */
-function checks(paths, s, backups) {
+function checks(paths, s, backups, opts = {}) {
   const out = [];
   const add = (level, title, detail, fix) => out.push({ level, title, detail, fix: fix || null });
 
-  add('ok', `Skyrim ${s.gameVersion}`, paths.gameDir);
+  if (!s.gameVersion) add('warn', "Couldn't read Skyrim's version", 'SkyrimSE.exe may be missing or damaged. Verify the game files in Steam.');
+  else add('ok', `Skyrim ${s.gameVersion}`, paths.gameDir);
+
+  // Versions seen when the user last acknowledged them; a change usually means Steam updated the game.
+  const seen = opts.lastSeen;
+  if (seen && seen.game && s.gameVersion && seen.game !== s.gameVersion) {
+    add('warn', `Skyrim was updated from ${seen.game} to ${s.gameVersion}`,
+      'SKSE, Address Library, SKSE plugins and Skyrim Together all need versions for the new game. Your friends must update too — compare setup codes.',
+      { action: 'ackVersions', label: 'Got it' });
+  }
+  if (seen && seen.str && s.str.version && seen.str !== s.str.version) {
+    add('info', `Skyrim Together updated from ${seen.str} to ${s.str.version}`, 'Everyone in your group needs the same version to connect.', { action: 'ackVersions', label: 'Got it' });
+  }
 
   if (!s.str.installed) add('error', 'Skyrim Together Reborn is not installed', 'Install it from the Mods page.', { action: 'goto', page: 'mods', label: 'Go to Mods' });
   else add('ok', `Skyrim Together Reborn ${s.str.version || ''}`.trim(), s.client.skseHooked ? 'Loaded correctly last time you played.' : 'Installed.');
+  if (s.strPluginsOff.length) {
+    add('error', "Skyrim Together's plugins are switched off", `${s.strPluginsOff.join(' and ')} must be active or multiplayer won't work.`,
+      { action: 'activatePlugins', names: s.strPluginsOff, label: 'Switch on' });
+  }
 
   if (!s.skse.installed) add('error', 'SKSE is not installed', 'Skyrim Together and most fixes need it.', { action: 'goto', page: 'mods', label: 'Go to Mods' });
-  else if (!s.skse.builtFor.includes(s.gameVersion)) add('error', `SKSE doesn't match your game`, `SKSE is built for ${s.skse.builtFor.join(', ')} but the game is ${s.gameVersion}. Update SKSE.`);
+  else if (s.gameVersion && !s.skse.builtFor.includes(s.gameVersion)) add('error', `SKSE doesn't match your game`, `SKSE is built for ${s.skse.builtFor.join(', ')} but the game is ${s.gameVersion}. Update SKSE.`);
   else add('ok', `SKSE ${s.skse.version}`, `Built for ${s.gameVersion}.`);
 
   if (!s.addressLibrary.installed) add('error', 'Address Library is missing', 'SKSE plugins need it.', { action: 'goto', page: 'mods', label: 'Go to Mods' });
@@ -60,6 +81,14 @@ function checks(paths, s, backups) {
   }
   if (order.length) add('error', 'Plugins load before their masters', order.map(p => `${p.plugin} loads before ${p.master}`).join('\n'));
   if (!missing.length && !order.length) add('ok', `Load order: ${s.loadOrder.length} plugins`, 'Every plugin has its masters.');
+  const c = s.counts;
+  if (c.full > c.fullLimit) {
+    add('error', `Too many full plugins (${c.full} of ${c.fullLimit})`, 'Skyrim crashes or silently drops plugins past this limit. Disable some, or ESL-flag the ones that allow it.',
+      { action: 'goto', page: 'cleanup', label: 'Open Cleanup' });
+  } else if (c.full > c.fullLimit - 10) {
+    add('warn', `Close to the plugin limit (${c.full} of ${c.fullLimit})`, "Light (ESL) plugins don't count toward this limit.");
+  }
+  if (c.light > c.lightLimit) add('error', `Too many light plugins (${c.light} of ${c.lightLimit})`, 'Disable some light (ESL) plugins.');
 
   if (s.cc.removable.length) {
     add('warn', s.cc.removable.length === 1 ? '1 Anniversary Edition add-on is active' : `${s.cc.removable.length} Anniversary Edition add-ons are active`,
@@ -83,9 +112,19 @@ function checks(paths, s, backups) {
   if (notSeen.length && s.skseResults.exists) add('info', 'New SKSE plugins not tested yet', `${notSeen.join(', ')} — launch the game once and come back to see if they load.`);
   if (loaded.length) add('ok', `${loaded.length} SKSE plugin${loaded.length > 1 ? 's' : ''} loaded last launch`, loaded.join(', '));
 
+  const crash = s.latestCrash;
+  if (crash && (!opts.crashAck || crash.at > opts.crashAck)) {
+    const suspects = [...crash.modules.map(m => m.name), ...crash.plugins.map(p => p.name)].slice(0, 4);
+    add('warn', `Skyrim crashed (${new Date(crash.at).toLocaleString()})`,
+      [crash.exception, suspects.length ? `Mentioned most: ${suspects.join(', ')}` : null].filter(Boolean).join('\n'),
+      { action: 'goto', page: 'logs', tab: 'crashes', label: 'View crash' });
+  } else if (s.client.crashed && !opts.clientCrashAck) {
+    add('warn', 'Skyrim crashed during the last Skyrim Together session', 'Install a crash logger (Mods → Stability) to see what caused it next time.',
+      { action: 'goto', page: 'logs', tab: 'client', label: 'View log' });
+  }
   if (s.client.problems.length) add('info', 'Warnings in the last Skyrim Together session', s.client.problems.slice(-5).join('\n'));
 
-  const serverIni = readText(path.join(paths.strDir, 'config', 'STServer.ini'));
+  const serverIni = readText(resolveCI(paths.strDir, 'config', 'STServer.ini'));
   if (serverIni) {
     const ini = new IniDoc(serverIni);
     if (!ini.get('GameServer', 'sPassword')) add('info', 'Your server has no password', 'Anyone who knows your IP can join.', { action: 'goto', page: 'config', label: 'Set one' });

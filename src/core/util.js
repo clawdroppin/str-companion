@@ -40,10 +40,39 @@ function findCaseInsensitive(dir, name) {
  * are case-sensitive, but Skyrim and its tools don't agree on casing ("Plugins.txt" vs "plugins.txt").
  * Segments that don't exist yet keep the casing given.
  */
-function resolveCI(base, ...segments) {
+function resolveCIStrict(base, ...segments) {
   let cur = base;
   for (const seg of segments) cur = findCaseInsensitive(cur, seg) || path.join(cur, seg);
   return cur;
+}
+
+// Windows file systems already ignore case, so skip the directory scans there.
+const resolveCI = process.platform === 'win32' ? (base, ...segments) => path.join(base, ...segments) : resolveCIStrict;
+
+/** True when `p` is `base` or inside it (guards against "../" in relative paths). */
+function isInside(base, p) {
+  const rel = path.relative(path.resolve(base), path.resolve(p));
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/** The last `maxBytes` of a text file. Logs grow without limit, and only their recent end matters. */
+function readTail(p, maxBytes = 1 << 20) {
+  let fd;
+  try {
+    fd = fs.openSync(p, 'r');
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    let text = buf.toString('utf8');
+    // Drop the partial first line when we started mid-file.
+    if (len < size) text = text.slice(text.indexOf('\n') + 1);
+    return text;
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
 }
 
 /** Full path of a command on PATH, or null. */
@@ -62,7 +91,19 @@ function which(cmd) {
  * Reads the FileVersion from a Windows PE file's VS_FIXEDFILEINFO block.
  * Returns e.g. "1.7.104.0", or null when the file has no version resource.
  */
+const peCache = new Map();
 function peFileVersion(file) {
+  // SkyrimSE.exe is ~37 MB; only re-read it when it actually changed.
+  let st;
+  try { st = fs.statSync(file); } catch { return null; }
+  const key = `${file}|${st.size}|${st.mtimeMs}`;
+  if (peCache.has(key)) return peCache.get(key);
+  const v = readPeVersion(file);
+  peCache.set(key, v);
+  return v;
+}
+
+function readPeVersion(file) {
   let buf;
   try { buf = fs.readFileSync(file); } catch { return null; }
   const sig = Buffer.from([0xbd, 0x04, 0xef, 0xfe]);
@@ -84,12 +125,20 @@ function shortVersion(v) {
   return v ? v.replace(/\.0$/, '') : v;
 }
 
+/**
+ * Compares version strings part by part. Each part is a number with an optional letter suffix,
+ * so "4.3.9c" > "4.3.9b" > "4.3.9" (USSEP uses letters for hotfixes).
+ */
 function compareVersions(a, b) {
-  const pa = String(a).split(/[.\-_]/).map(x => parseInt(x, 10) || 0);
-  const pb = String(b).split(/[.\-_]/).map(x => parseInt(x, 10) || 0);
+  const parts = v => String(v).trim().replace(/^v/i, '').split(/[.\-_]/).map(x => {
+    const m = x.match(/^(\d*)(.*)$/);
+    return { n: parseInt(m[1], 10) || 0, s: m[2].toLowerCase() };
+  });
+  const pa = parts(a), pb = parts(b);
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-    const d = (pa[i] || 0) - (pb[i] || 0);
-    if (d) return d < 0 ? -1 : 1;
+    const x = pa[i] || { n: 0, s: '' }, y = pb[i] || { n: 0, s: '' };
+    if (x.n !== y.n) return x.n < y.n ? -1 : 1;
+    if (x.s !== y.s) return x.s < y.s ? -1 : 1;
   }
   return 0;
 }
@@ -168,11 +217,20 @@ function removeEmptyDirs(dir, stopAt) {
   }
 }
 
+function dirSize(dir) {
+  let total = 0;
+  for (const rel of walkFiles(dir)) {
+    try { total += fs.statSync(path.join(dir, rel)).size; } catch {}
+  }
+  return total;
+}
+
 function timestampId() {
   return new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
 }
 
 module.exports = {
-  exists, readText, readJson, writeJson, listDir, findCaseInsensitive, resolveCI, which, peFileVersion, shortVersion,
-  compareVersions, run, runningProcesses, parsePsOutput, moveFile, walkFiles, removeEmptyDirs, timestampId,
+  exists, readText, readJson, writeJson, listDir, findCaseInsensitive, resolveCI, resolveCIStrict, isInside, readTail,
+  which, peFileVersion, shortVersion, compareVersions, run, runningProcesses, parsePsOutput, moveFile, walkFiles,
+  removeEmptyDirs, timestampId, dirSize,
 };

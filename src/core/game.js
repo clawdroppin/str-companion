@@ -1,7 +1,7 @@
 'use strict';
 const path = require('path');
 const os = require('os');
-const { exists, readText, readJson, listDir, findCaseInsensitive, resolveCI, peFileVersion, shortVersion, run } = require('./util');
+const { exists, readText, readJson, readTail, listDir, findCaseInsensitive, resolveCI, peFileVersion, shortVersion, run } = require('./util');
 
 const APP_ID = '489830';
 
@@ -139,7 +139,8 @@ function addressLibraryInfo(paths, gameVersion) {
   const dir = resolveCI(paths.dataDir, 'SKSE', 'Plugins');
   const files = listDir(dir).filter(e => /^version(lib)?-[\d-]+\.bin$/i.test(e.name)).map(e => e.name);
   const want = gameVersion ? gameVersion.split('.').concat(['0', '0', '0', '0']).slice(0, 4).join('-') : null;
-  const match = want ? files.find(f => f.toLowerCase().startsWith(`versionlib-${want}`)) : null;
+  // AE (1.6+) databases are versionlib-*.bin; SE (1.5.x) ones are version-*.bin.
+  const match = want ? files.find(f => /^version(lib)?-/i.test(f) && f.toLowerCase().replace(/^version(lib)?-/, '').startsWith(want)) : null;
   return { installed: files.length > 0, matchesGame: !!match, file: match || null, count: files.length };
 }
 
@@ -151,7 +152,7 @@ function strInfo(paths, vortexMods = []) {
   const vortex = vortexMods.find(m => m.nexusId === 69993);
   if (vortex) version = vortex.version;
   if (!version) {
-    const log = readText(path.join(paths.strDir, 'logs', 'STServerOut.log'), '');
+    const log = readTail(resolveCI(paths.strDir, 'logs', 'STServerOut.log'));
     const m = [...log.matchAll(/Server v([\d.]+)/g)].pop();
     if (m) version = m[1];
   }

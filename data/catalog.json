@@ -106,6 +106,18 @@
       "dll": "SSEDisplayTweaks.dll"
     },
     {
+      "id": 59818,
+      "name": "Crash Logger SSE AE VR",
+      "category": "stability",
+      "desc": "Writes a crash report when Skyrim crashes. STR Companion reads it and names the mods most likely involved (Logs → Crash reports).",
+      "detect": [
+        "Data/SKSE/Plugins/CrashLogger.dll"
+      ],
+      "compat": "test",
+      "versionLocked": true,
+      "dll": "CrashLogger.dll"
+    },
+    {
       "id": 12604,
       "name": "SkyUI",
       "category": "recommended",

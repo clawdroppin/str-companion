@@ -15,6 +15,7 @@ node test/fixtures.js <dir>   # create a fake Proton-style install, prints its g
 # Headless UI check: screenshots every page into <dir> plus report.json, then quits.
 # Uses a throwaway profile, so it works even while the real app is open.
 STRC_SHOTS=<dir> npm start
+STRC_COMPARE_CODE=<STR2-…> STRC_SHOTS=<dir> npm start   # the Friends compare step uses this code instead of your own
 STRC_GAME_DIR=<fake game> STRC_SHOTS=<dir> npm start        # against a fixture instead of the real game
 xvfb-run -a npx electron . --no-sandbox                     # (Linux CI) with the two env vars above
 ```
@@ -39,15 +40,15 @@ src/core/       Pure Node modules that touch the game. No Electron imports. Unit
   game.js       paths, Steam library detection, SKSE/Address Library/STR detection, Vortex manifests
   plugins.js    TES4 header parsing, Plugins.txt/loadorder.txt, effective load order, master checks
   cleanup.js    Creation Club report, plugin report, known-incompatible list
-  backup.js     BackupStore: move-to-backup batches + manifest, restore, save snapshots, config snapshots
+  backup.js     BackupStore: move-to-backup batches + manifest, restore, delete, save snapshots (async, auto-pruned), config snapshots
   installer.js  archive extraction (7-Zip), layout detection (Data vs game root vs FOMOD), registry
   configs.js    config file registry, load (with metadata), save, presets
   health.js     snapshot() gathers state; checks() turns it into the dashboard list with fixes
   mods.js       catalog + Vortex + registry merge, Nexus update checks
   nexus.js      Nexus Mods v1 API client, downloads
-  logs.js       server session parsing, client log problems, SKSE plugin load results
+  logs.js       server session parsing, client log problems, SKSE plugin load results, crash-report summaries
   launch.js     process status, launching client/server, Steam auto-update setting
-  share.js      STR1- setup codes (deflate + base64url JSON) and comparison
+  share.js      STR2- setup codes (deflate + base64url JSON, STR1- still parsed), comparison, load-order match plans
 src/main/       Electron main process. main.js = IPC handlers (`handle('channel', fn)`), preload.js = bridge
 src/renderer/   UI: index.html, styles.css, app.js (vanilla JS, one async function per page)
 data/           catalog.json (mods), config-meta.json (friendly labels/types), presets.json
@@ -69,7 +70,10 @@ The renderer talks to the main process only through `api.call(channel, ...args)`
 4. **Snapshot before editing configs** (`backups.snapshotConfig`). INI edits are refused while Skyrim runs (`assertGameClosed`), because the game rewrites them on exit.
 5. **Secrets:** the Nexus API key is stored only via `safeStorage` and only sent to `api.nexusmods.com`. Never return it to the renderer. `settings:set` returns only whitelisted fields.
 6. **External links:** `shell:external` uses an allowlist regex. Keep it tight.
-7. **Escape everything** rendered with `innerHTML` through `esc()`. Mod names, log lines and INI values are untrusted.
+7. **Escape everything** rendered with `innerHTML` through `esc()`. Mod names, log lines, INI values and friends' setup codes are untrusted.
+8. **Contain paths.** Any relative path from the renderer, a manifest or an archive goes through `util.isInside(gameDir, …)` before files are moved or written.
+9. **Don't block the main process** with big file copies; use `fs.promises` (snapshots, installs). A blocked main process freezes the window.
+10. **Dialogs:** use `confirmBox()` / `modal(html, onMount, onDismiss)`; dismissal (Esc, backdrop, Cancel) must resolve the caller.
 
 ## Domain facts the code relies on
 

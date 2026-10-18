@@ -14,8 +14,21 @@ const PROTECTED = new Set([...BASE_MASTERS, '_ResourcePack.esl', 'SkyrimTogether
 const PLUGIN_RE = /\.(esp|esm|esl)$/i;
 const CC_RE = /^cc[a-z]+sse\d{3}/i;
 
-/** Parses a plugin's TES4 header: flags and master list. */
+const headerCache = new Map();
+
+/** Parses a plugin's TES4 header: flags and master list. Cached until the file changes. */
 function readHeader(file) {
+  let st;
+  try { st = fs.statSync(file); } catch { return null; }
+  const key = `${file}|${st.size}|${st.mtimeMs}`;
+  if (headerCache.has(key)) return headerCache.get(key);
+  const h = parseHeader(file);
+  if (headerCache.size > 2000) headerCache.clear();
+  headerCache.set(key, h);
+  return h;
+}
+
+function parseHeader(file) {
   let fd;
   try {
     fd = fs.openSync(file, 'r');
@@ -27,12 +40,16 @@ function readHeader(file) {
     fs.readSync(fd, data, 0, data.length, 24);
     const masters = [];
     let author = '', description = '';
+    let bigLen = null;
+    const z = s => s.toString('latin1').replace(/\0.*$/s, '');
     for (let o = 0; o + 6 <= data.length;) {
       const type = data.toString('latin1', o, o + 4);
-      const len = data.readUInt16LE(o + 4);
+      // XXXX carries the real length of the next field when it's over 64 KB (e.g. ONAM in big masters).
+      const len = bigLen ?? data.readUInt16LE(o + 4);
+      bigLen = null;
       const body = data.subarray(o + 6, o + 6 + len);
-      const z = s => s.toString('latin1').replace(/\0.*$/s, '');
-      if (type === 'MAST') masters.push(z(body));
+      if (type === 'XXXX' && body.length >= 4) bigLen = body.readUInt32LE(0);
+      else if (type === 'MAST') masters.push(z(body));
       else if (type === 'CNAM') author = z(body);
       else if (type === 'SNAM') description = z(body);
       o += 6 + len;
@@ -41,7 +58,8 @@ function readHeader(file) {
       masters,
       author,
       description,
-      isMaster: !!(flags & 0x1),
+      // The game treats .esm and .esl files as masters whatever their flags say.
+      isMaster: !!(flags & 0x1) || /\.(esm|esl)$/i.test(file),
       isLight: !!(flags & 0x200) || /\.esl$/i.test(file),
     };
   } catch {
@@ -184,7 +202,51 @@ function creationClubFiles(gameDir) {
     }));
 }
 
+/**
+ * Skyrim's plugin limits: 254 full plugins (each takes a load-order slot; slot FE is shared by all
+ * light plugins) and 4096 light (ESL-flagged) plugins.
+ */
+function pluginCounts(gameDir, order) {
+  const dataDir = resolveCI(gameDir, 'Data');
+  let full = 0, light = 0;
+  for (const p of order) {
+    const h = readHeader(path.join(dataDir, p.name));
+    if (h && h.isLight) light++; else full++;
+  }
+  return { full, light, fullLimit: 254, lightLimit: 4096 };
+}
+
+/**
+ * Rewrites Plugins.txt so the plugins listed in `wanted` (in that order) are active and everything
+ * else is listed but inactive. Plugins the game loads on its own (base masters, Skyrim.ccc) are skipped.
+ */
+function applyLoadOrder(gameDir, localAppDir, wanted) {
+  const dataDir = resolveCI(gameDir, 'Data');
+  const onDisk = new Map(listDir(dataDir).filter(e => e.isFile() && PLUGIN_RE.test(e.name)).map(e => [e.name.toLowerCase(), e.name]));
+  const implicit = new Set([...BASE_MASTERS, ...readCcc(gameDir)].map(s => s.toLowerCase()));
+  const file = resolveCI(localAppDir, 'Plugins.txt');
+  const current = exists(file) ? readPluginsTxt(file) : [];
+  const out = [];
+  const seen = new Set();
+  for (const n of wanted) {
+    const k = n.toLowerCase();
+    if (implicit.has(k) || seen.has(k) || !onDisk.has(k)) continue;
+    seen.add(k);
+    out.push({ name: onDisk.get(k), active: true });
+  }
+  for (const e of current) {
+    const k = e.name.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ name: e.name, active: false });
+  }
+  fs.mkdirSync(localAppDir, { recursive: true });
+  writePluginsTxt(file, out);
+  return out;
+}
+
 module.exports = {
   BASE_MASTERS, FREE_CC, PROTECTED, PLUGIN_RE, readHeader, readPluginsTxt, writePluginsTxt, removeFromLists,
   addToPluginsTxt, readCcc, effectiveLoadOrder, checkMasters, companionArchives, creationClubFiles, isFreeCc,
+  pluginCounts, applyLoadOrder,
 };
