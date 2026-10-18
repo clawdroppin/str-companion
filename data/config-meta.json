@@ -1,0 +1,63 @@
+{
+  "server": {
+    "general/sLogLevel": { "label": "Log detail", "type": "enum", "options": ["trace", "debug", "info", "warn", "error"], "group": "Server", "desc": "How much the server writes to its log. 'info' is right for normal play." },
+    "general/bConsole": { "label": "Server console", "type": "bool", "group": "Server", "desc": "Lets you type admin commands into the server window." },
+    "LiveServices/bAnnounceServer": { "label": "List on public server browser", "type": "bool", "group": "Server", "desc": "Keep this off when playing with friends; they join by IP." },
+    "GameServer/sServerName": { "label": "Server name", "type": "string", "group": "Server" },
+    "GameServer/sPassword": { "label": "Join password", "type": "secret", "group": "Server", "desc": "Friends need this to join. Leave empty to let anyone join." },
+    "GameServer/sAdminPassword": { "label": "Admin password", "type": "secret", "group": "Server", "desc": "Joining with this password gives admin rights." },
+    "GameServer/uMaxPlayerCount": { "label": "Max players", "type": "int", "min": 1, "max": 16, "group": "Server", "desc": "More than 8 is not recommended by the Skyrim Together team." },
+    "GameServer/uPort": { "label": "Port", "type": "int", "min": 1024, "max": 65535, "group": "Server", "desc": "Friends outside your home network need this port (UDP) forwarded on your router. Default 10578." },
+    "GameServer/bPremiumMode": { "label": "60 updates per second", "type": "bool", "group": "Server", "desc": "Smoother sync at a small CPU/bandwidth cost. Off = 30 per second." },
+    "Gameplay/uDifficulty": { "label": "Difficulty (everyone)", "type": "enum", "options": [["0", "Novice"], ["1", "Apprentice"], ["2", "Adept"], ["3", "Expert"], ["4", "Master"], ["5", "Legendary"]], "group": "Gameplay", "desc": "Forced for all players. Enemies don't scale with party size, so 3 players can handle a higher difficulty than solo." },
+    "Gameplay/bEnableXpSync": { "label": "Share combat XP", "type": "bool", "group": "Gameplay", "desc": "Everyone in the party gets XP from kills." },
+    "Gameplay/bAutoPartyJoin": { "label": "Auto-join party", "type": "bool", "group": "Gameplay", "desc": "Players join the party automatically when there's only one." },
+    "Gameplay/bEnableDeathSystem": { "label": "Co-op death system", "type": "bool", "group": "Gameplay", "desc": "Downed players respawn instead of reloading. Only turn off if another mod replaces death." },
+    "Gameplay/fGoldLossFactor": { "label": "Gold lost on death", "type": "float", "min": 0, "max": 1, "step": 0.01, "group": "Gameplay", "desc": "0 = lose nothing, 0.05 = lose 5%." },
+    "Gameplay/bSyncPlayerHomes": { "label": "Shared house chests", "type": "bool", "group": "Gameplay", "desc": "Chests and displays in player homes are shared — handy as a group stash." },
+    "Gameplay/bSyncPlayerCalendar": { "label": "Sync in-game date", "type": "bool", "group": "Gameplay", "desc": "Everyone uses the date of whoever is furthest ahead when they connect." },
+    "Gameplay/uTimeScale": { "label": "Time scale", "type": "int", "min": 0, "max": 1000, "group": "Gameplay", "desc": "In-game seconds per real second. Default 20. Changing it can make the game unstable.", "warn": "Values other than 20 can cause instability." },
+    "Gameplay/bEnablePvp": { "label": "PvP", "type": "bool", "group": "Gameplay", "desc": "Lets players damage each other." },
+    "Gameplay/bEnableGreetings": { "label": "NPC greetings", "type": "bool", "group": "Gameplay", "desc": "NPCs greet you as you pass. Off by default because it gets spammy with dialogue sync." },
+    "Gameplay/bEnableMiscQuestSync": { "label": "Sync side errands (experimental)", "type": "bool", "group": "Experimental", "desc": "Syncs Miscellaneous journal quests. Radiant errands can pick different targets per player, so journals may disagree.", "warn": "Experimental — can desync radiant quests." },
+    "Gameplay/bEnableItemDrops": { "label": "Sync dropped items (experimental)", "type": "bool", "group": "Experimental", "desc": "Items you drop appear for friends so they can pick them up. Can duplicate or lose items.", "warn": "Experimental — save before handing over valuables." },
+    "ModPolicy/bEnableModCheck": { "label": "Enforce matching mods", "type": "bool", "group": "Mods", "desc": "Refuses players whose mods don't match Data/loadorder.txt on the server PC." },
+    "ModPolicy/bAllowSKSE": { "label": "Allow SKSE users", "type": "bool", "group": "Mods" },
+    "ModPolicy/bAllowMO2": { "label": "Allow Mod Organizer 2 users", "type": "bool", "group": "Mods" }
+  },
+  "prefs": {
+    "Display/bFull Screen": { "label": "Exclusive fullscreen", "type": "bool01", "group": "Window", "desc": "Turn off and use Borderless for easy alt-tab to Discord." },
+    "Display/bBorderless": { "label": "Borderless window", "type": "bool01", "group": "Window", "desc": "Fullscreen-looking window that alt-tabs instantly. Recommended for co-op." },
+    "Display/iSize W": { "label": "Resolution width", "type": "int", "group": "Window" },
+    "Display/iSize H": { "label": "Resolution height", "type": "int", "group": "Window" },
+    "Display/iVSyncPresentInterval": { "label": "VSync", "type": "bool01", "group": "Window", "desc": "Keeps FPS at or below your refresh rate. Skyrim's physics break above 60 FPS without a frame-rate fix mod." },
+    "Display/fGamma": { "label": "Brightness (gamma)", "type": "float", "min": 0.5, "max": 2, "step": 0.05, "group": "Window" },
+    "Display/fShadowDistance": { "label": "Shadow distance", "type": "int", "min": 1000, "max": 20000, "group": "Graphics", "desc": "Lower = more FPS." },
+    "Display/iShadowMapResolution": { "label": "Shadow quality", "type": "enum", "options": [["1024", "Low"], ["2048", "Medium"], ["4096", "High"], ["8192", "Ultra"]], "group": "Graphics" },
+    "Display/bUseTAA": { "label": "Anti-aliasing (TAA)", "type": "bool01", "group": "Graphics" },
+    "Display/bFXAAEnabled": { "label": "Anti-aliasing (FXAA)", "type": "bool01", "group": "Graphics", "desc": "Use either TAA or FXAA, not both." },
+    "Display/bSAOEnable": { "label": "Ambient occlusion", "type": "bool01", "group": "Graphics" },
+    "Display/bVolumetricLightingEnable": { "label": "God rays", "type": "bool01", "group": "Graphics" },
+    "Display/bScreenSpaceReflectionEnabled": { "label": "Water/surface reflections", "type": "bool01", "group": "Graphics" },
+    "Imagespace/bDoDepthOfField": { "label": "Depth of field", "type": "bool01", "group": "Graphics" },
+    "Interface/bDialogueSubtitles": { "label": "Dialogue subtitles", "type": "bool01", "group": "Interface", "desc": "Recommended in co-op so nobody misses quest lines while chatting." },
+    "Interface/bGeneralSubtitles": { "label": "Background chatter subtitles", "type": "bool01", "group": "Interface" },
+    "MAIN/bCrosshairEnabled": { "label": "Crosshair", "type": "bool01", "group": "Interface" },
+    "MAIN/fHUDOpacity": { "label": "HUD opacity", "type": "float", "min": 0, "max": 1, "step": 0.05, "group": "Interface" },
+    "MAIN/bGamepadEnable": { "label": "Controller support", "type": "bool01", "group": "Controls" },
+    "MAIN/bSaveOnTravel": { "label": "Autosave on fast travel", "type": "bool01", "group": "Saving" },
+    "MAIN/bSaveOnWait": { "label": "Autosave on wait", "type": "bool01", "group": "Saving" },
+    "MAIN/bSaveOnRest": { "label": "Autosave on sleep", "type": "bool01", "group": "Saving" }
+  },
+  "skyrim": {
+    "General/uExterior Cell Buffer": { "label": "Exterior cell buffer", "type": "int", "group": "Memory", "desc": "How many outdoor cells stay in memory. 36 is the default for 1.6+ — don't raise it without a reason." },
+    "Papyrus/fPostLoadUpdateTimeMS": { "label": "Script time after load (ms)", "type": "float", "group": "Scripts", "desc": "Default 500. Leave as is." },
+    "Papyrus/bEnableLogging": { "label": "Script logging", "type": "bool01", "group": "Debugging", "desc": "Writes Papyrus logs for troubleshooting. Turn off afterwards." },
+    "Grass/bAllowCreateGrass": { "label": "Grass", "type": "bool01", "group": "Graphics" }
+  },
+  "enginefixes": {
+    "Patches/iSaveGameMaxSize": { "label": "Max save size (MB)", "type": "int", "min": 64, "max": 512, "group": "Saves" },
+    "MemoryManager/bOverrideMemoryManager": { "label": "Faster memory manager", "type": "bool", "group": "Memory" },
+    "MemoryManager/bOverrideScaleformAllocator": { "label": "Faster UI memory", "type": "bool", "group": "Memory" }
+  }
+}

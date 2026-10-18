@@ -1,0 +1,77 @@
+{
+  "server": [
+    {
+      "name": "Story Co-op (3 players)",
+      "description": "Built for playing the campaign with two friends: shared XP and house chests, synced dates, Master difficulty, experimental sync off.",
+      "values": {
+        "GameServer/uMaxPlayerCount": "3", "Gameplay/uDifficulty": "4", "Gameplay/bEnableXpSync": "true",
+        "Gameplay/bAutoPartyJoin": "true", "Gameplay/bEnableDeathSystem": "true", "Gameplay/fGoldLossFactor": "0",
+        "Gameplay/bSyncPlayerHomes": "true", "Gameplay/bSyncPlayerCalendar": "true", "Gameplay/uTimeScale": "20",
+        "Gameplay/bEnablePvp": "false", "Gameplay/bEnableGreetings": "false", "Gameplay/bEnableMiscQuestSync": "false",
+        "Gameplay/bEnableItemDrops": "false", "GameServer/bPremiumMode": "true", "LiveServices/bAnnounceServer": "false"
+      }
+    },
+    {
+      "name": "Relaxed Adventure",
+      "description": "Easier fights and no penalties — good for exploring and messing around.",
+      "values": {
+        "Gameplay/uDifficulty": "2", "Gameplay/fGoldLossFactor": "0", "Gameplay/bEnableXpSync": "true",
+        "Gameplay/bSyncPlayerHomes": "true", "Gameplay/bEnableGreetings": "false", "Gameplay/bEnablePvp": "false"
+      }
+    },
+    {
+      "name": "Hardcore",
+      "description": "Legendary difficulty and 10% gold lost on death.",
+      "values": {
+        "Gameplay/uDifficulty": "5", "Gameplay/fGoldLossFactor": "0.1", "Gameplay/bEnableDeathSystem": "true",
+        "Gameplay/bEnableXpSync": "true"
+      }
+    },
+    {
+      "name": "Big Group (up to 8)",
+      "description": "More player slots for bigger hangouts.",
+      "values": {
+        "GameServer/uMaxPlayerCount": "8", "GameServer/bPremiumMode": "true", "Gameplay/bAutoPartyJoin": "true"
+      }
+    },
+    {
+      "name": "Experimental Sync",
+      "description": "Turns on side-errand and dropped-item sync. More features, more glitches — save often.",
+      "values": { "Gameplay/bEnableMiscQuestSync": "true", "Gameplay/bEnableItemDrops": "true" }
+    },
+    {
+      "name": "Skyrim Together defaults",
+      "description": "What the server ships with.",
+      "values": {
+        "GameServer/uMaxPlayerCount": "8", "Gameplay/uDifficulty": "4", "Gameplay/bEnableXpSync": "true",
+        "Gameplay/bAutoPartyJoin": "true", "Gameplay/bEnableDeathSystem": "true", "Gameplay/fGoldLossFactor": "0",
+        "Gameplay/bSyncPlayerHomes": "false", "Gameplay/bSyncPlayerCalendar": "false", "Gameplay/uTimeScale": "20",
+        "Gameplay/bEnablePvp": "false", "Gameplay/bEnableGreetings": "false", "Gameplay/bEnableMiscQuestSync": "false",
+        "Gameplay/bEnableItemDrops": "false"
+      }
+    }
+  ],
+  "prefs": [
+    {
+      "name": "Co-op Friendly",
+      "description": "Borderless window for instant alt-tab to Discord, dialogue subtitles on.",
+      "values": { "Display/bFull Screen": "0", "Display/bBorderless": "1", "Interface/bDialogueSubtitles": "1", "Interface/bGeneralSubtitles": "0" }
+    },
+    {
+      "name": "Performance",
+      "description": "Cuts the most expensive effects for higher FPS on older PCs.",
+      "values": {
+        "Display/fShadowDistance": "4000.0000", "Display/iShadowMapResolution": "2048", "Display/bVolumetricLightingEnable": "0",
+        "Display/bScreenSpaceReflectionEnabled": "0", "Display/bSAOEnable": "0", "Imagespace/bDoDepthOfField": "0"
+      }
+    },
+    {
+      "name": "Quality",
+      "description": "High shadows and all effects on.",
+      "values": {
+        "Display/fShadowDistance": "10000.0000", "Display/iShadowMapResolution": "4096", "Display/bVolumetricLightingEnable": "1",
+        "Display/bScreenSpaceReflectionEnabled": "1", "Display/bSAOEnable": "1", "Display/bUseTAA": "1", "Display/bFXAAEnabled": "0"
+      }
+    }
+  ]
+}

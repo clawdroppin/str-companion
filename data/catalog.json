@@ -1,0 +1,192 @@
+{
+  "categories": [
+    {
+      "id": "required",
+      "title": "Required",
+      "desc": "Skyrim Together and what it needs. Every player must have these."
+    },
+    {
+      "id": "stability",
+      "title": "Stability",
+      "desc": "Crash and bug fixes. They only affect your own PC, so friends don't strictly have to match — but they should."
+    },
+    {
+      "id": "recommended",
+      "title": "Recommended",
+      "desc": "Quality-of-life improvements that work well in co-op."
+    },
+    {
+      "id": "visual",
+      "title": "Visuals",
+      "desc": "Graphics mods generally work fine with Skyrim Together."
+    },
+    {
+      "id": "fun",
+      "title": "More content",
+      "desc": "Adds items to the world. Every player must install the same ones in the same order."
+    }
+  ],
+  "mods": [
+    {
+      "id": 69993,
+      "name": "Skyrim Together Reborn",
+      "category": "required",
+      "desc": "The multiplayer mod itself.",
+      "detect": [
+        "Data/SkyrimTogetherReborn/SkyrimTogether.exe"
+      ],
+      "compat": "safe"
+    },
+    {
+      "id": 30379,
+      "name": "Skyrim Script Extender (SKSE64)",
+      "category": "required",
+      "desc": "Lets other mods add features to the game. Must match your exact game version.",
+      "detect": [
+        "skse64_loader.exe"
+      ],
+      "compat": "safe",
+      "versionLocked": true,
+      "altUrl": "https://skse.silverlock.org/"
+    },
+    {
+      "id": 32444,
+      "name": "Address Library for SKSE Plugins",
+      "category": "required",
+      "desc": "Lets SKSE mods work across game versions. Use the 'All in One' file.",
+      "detect": [
+        "Data/SKSE/Plugins/versionlib-*.bin"
+      ],
+      "compat": "safe"
+    },
+    {
+      "id": 266,
+      "name": "Unofficial Skyrim Special Edition Patch",
+      "category": "required",
+      "desc": "Fixes thousands of quest and game bugs. Needs the 4 free Creation Club files.",
+      "detect": [
+        "Data/unofficial skyrim special edition patch.esp"
+      ],
+      "compat": "safe"
+    },
+    {
+      "id": 17230,
+      "name": "SSE Engine Fixes",
+      "category": "stability",
+      "desc": "Fixes engine crashes and memory problems. The Skyrim Together team confirms Engine Fixes 7 loads with 1.8.",
+      "detect": [
+        "Data/SKSE/Plugins/EngineFixes.dll"
+      ],
+      "compat": "safe",
+      "versionLocked": true,
+      "dll": "EngineFixes.dll"
+    },
+    {
+      "id": 33261,
+      "name": "Bug Fixes SSE",
+      "category": "stability",
+      "desc": "Fixes small engine bugs that cause odd behavior.",
+      "detect": [
+        "Data/SKSE/Plugins/BugFixesSSE.dll"
+      ],
+      "compat": "likely",
+      "versionLocked": true,
+      "dll": "BugFixesSSE.dll"
+    },
+    {
+      "id": 34705,
+      "name": "SSE Display Tweaks",
+      "category": "stability",
+      "desc": "Borderless and frame-rate fixes, plus a physics fix for high refresh rate monitors.",
+      "detect": [
+        "Data/SKSE/Plugins/SSEDisplayTweaks.dll"
+      ],
+      "compat": "test",
+      "versionLocked": true,
+      "dll": "SSEDisplayTweaks.dll"
+    },
+    {
+      "id": 12604,
+      "name": "SkyUI",
+      "category": "recommended",
+      "desc": "Much better inventory, favorites and the Mod Configuration Menu.",
+      "detect": [
+        "Data/SkyUI_SE.esp"
+      ],
+      "compat": "safe"
+    },
+    {
+      "id": 27859,
+      "name": "Skyrim Souls RE - Updated",
+      "category": "recommended",
+      "desc": "Menus don't pause the game — makes sense in multiplayer, where the world keeps going anyway.",
+      "detect": [
+        "Data/SKSE/Plugins/SkyrimSoulsRE.dll"
+      ],
+      "compat": "safe",
+      "versionLocked": true,
+      "dll": "SkyrimSoulsRE.dll"
+    },
+    {
+      "id": 5804,
+      "name": "A Quality World Map",
+      "category": "recommended",
+      "desc": "Readable world map with roads — easier to plan where the group goes.",
+      "compat": "safe"
+    },
+    {
+      "id": 1429,
+      "name": "Better Dialogue Controls",
+      "category": "recommended",
+      "desc": "Fixes mouse selection in dialogue menus.",
+      "compat": "safe"
+    },
+    {
+      "id": 1428,
+      "name": "Better MessageBox Controls",
+      "category": "recommended",
+      "desc": "Keyboard and mouse fixes for pop-up boxes.",
+      "compat": "safe"
+    },
+    {
+      "id": 659,
+      "name": "Static Mesh Improvement Mod (SMIM)",
+      "category": "visual",
+      "desc": "Better-looking objects all over the world.",
+      "compat": "safe"
+    },
+    {
+      "id": 2182,
+      "name": "Realistic Water Two",
+      "category": "visual",
+      "desc": "Nicer water. Has a plugin, so everyone should install it.",
+      "compat": "likely"
+    },
+    {
+      "id": 2424,
+      "name": "Enhanced Lights and FX",
+      "category": "visual",
+      "desc": "More atmospheric interior lighting. Has a plugin, so everyone should install it.",
+      "compat": "likely"
+    },
+    {
+      "id": 3144,
+      "name": "Immersive Weapons",
+      "category": "fun",
+      "desc": "Hundreds of new weapons in loot and shops. Used on community co-op servers.",
+      "compat": "likely"
+    },
+    {
+      "id": 3479,
+      "name": "Immersive Armors",
+      "category": "fun",
+      "desc": "Lots of new armor sets in loot and shops. Used on community co-op servers.",
+      "compat": "likely"
+    }
+  ],
+  "compatLabels": {
+    "safe": "Known to work with Skyrim Together",
+    "likely": "Reported to work — test before a long session",
+    "test": "Unverified — test it first"
+  }
+}
