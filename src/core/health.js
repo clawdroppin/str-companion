@@ -62,7 +62,7 @@ function checks(paths, s, backups) {
   if (!missing.length && !order.length) add('ok', `Load order: ${s.loadOrder.length} plugins`, 'Every plugin has its masters.');
 
   if (s.cc.removable.length) {
-    add('warn', `${s.cc.removable.length} Anniversary Edition add-ons are active`,
+    add('warn', s.cc.removable.length === 1 ? '1 Anniversary Edition add-on is active' : `${s.cc.removable.length} Anniversary Edition add-ons are active`,
       'The Skyrim Together team recommends disabling them, and every player would need the exact same set. The 4 free ones USSEP needs are kept.',
       { action: 'backupCC', label: 'Move to backup' });
   } else add('ok', 'No extra Anniversary Edition content', s.cc.keep.length ? `Keeping the ${s.cc.keep.length} free files USSEP needs.` : '');

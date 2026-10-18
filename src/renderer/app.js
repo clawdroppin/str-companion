@@ -137,7 +137,7 @@ async function dashboard() {
       <div class="stat ${verdict[0]}"><div class="k">Status</div><div class="v">${verdict[1]}</div><div class="d">${verdict[2]}</div></div>
       <div class="stat"><div class="k">Skyrim</div><div class="v">${esc(s.gameVersion || '?')}</div><div class="d">${s.autoUpdate ? esc(s.autoUpdate.label) : ''}</div></div>
       <div class="stat ${s.str.installed ? '' : 'bad'}"><div class="k">Skyrim Together</div><div class="v">${s.str.installed ? esc(s.str.version || 'Installed') : 'Missing'}</div><div class="d">${s.manager ? 'Managed by ' + esc(s.manager) : ''}</div></div>
-      <div class="stat"><div class="k">Plugins loaded</div><div class="v">${s.pluginCount}</div><div class="d">${s.ccRemovable ? s.ccRemovable + ' Anniversary add-ons' : 'No extra AE content'}</div></div>
+      <div class="stat"><div class="k">Plugins loaded</div><div class="v">${s.pluginCount}</div><div class="d">${s.ccRemovable ? s.ccRemovable + (s.ccRemovable === 1 ? ' Anniversary add-on' : ' Anniversary add-ons') : 'No extra AE content'}</div></div>
     </div>
     <div class="checks">${checks.map((c, i) => `
       <div class="check ${c.level}">
