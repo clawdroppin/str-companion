@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const { IniDoc, inferType } = require('./ini');
-const { exists, readText, readJson, writeJson } = require('./util');
+const { exists, readText, readJson, writeJson, resolveCI } = require('./util');
 
 const META = readJson(path.join(__dirname, '..', '..', 'data', 'config-meta.json'), {});
 const BUILTIN_PRESETS = readJson(path.join(__dirname, '..', '..', 'data', 'presets.json'), {});
@@ -10,12 +10,12 @@ const BUILTIN_PRESETS = readJson(path.join(__dirname, '..', '..', 'data', 'prese
 /** Config files the app knows how to edit. */
 function configFiles(paths) {
   return [
-    { id: 'server', title: 'Skyrim Together server', file: path.join(paths.strDir, 'config', 'STServer.ini'), note: 'Changes apply the next time the server starts.' },
-    { id: 'prefs', title: 'Game settings (SkyrimPrefs.ini)', file: path.join(paths.myGames, 'SkyrimPrefs.ini'), note: 'Close the game before saving; Skyrim rewrites this file when it exits.' },
-    { id: 'skyrim', title: 'Engine settings (Skyrim.ini)', file: path.join(paths.myGames, 'Skyrim.ini'), note: 'Close the game before saving.' },
-    { id: 'custom', title: 'Custom overrides (SkyrimCustom.ini)', file: path.join(paths.myGames, 'SkyrimCustom.ini'), note: 'Settings here override Skyrim.ini and SkyrimPrefs.ini.' },
-    { id: 'enginefixes', title: 'Engine Fixes', file: path.join(paths.dataDir, 'SKSE', 'Plugins', 'EngineFixes.toml'), toml: true, note: 'Only used if Engine Fixes is installed.' },
-    { id: 'displaytweaks', title: 'SSE Display Tweaks', file: path.join(paths.dataDir, 'SKSE', 'Plugins', 'SSEDisplayTweaks.ini'), note: 'Only used if SSE Display Tweaks is installed.' },
+    { id: 'server', title: 'Skyrim Together server', file: resolveCI(paths.strDir, 'config', 'STServer.ini'), note: 'Changes apply the next time the server starts.' },
+    { id: 'prefs', title: 'Game settings (SkyrimPrefs.ini)', file: resolveCI(paths.myGames, 'SkyrimPrefs.ini'), note: 'Close the game before saving; Skyrim rewrites this file when it exits.' },
+    { id: 'skyrim', title: 'Engine settings (Skyrim.ini)', file: resolveCI(paths.myGames, 'Skyrim.ini'), note: 'Close the game before saving.' },
+    { id: 'custom', title: 'Custom overrides (SkyrimCustom.ini)', file: resolveCI(paths.myGames, 'SkyrimCustom.ini'), note: 'Settings here override Skyrim.ini and SkyrimPrefs.ini.' },
+    { id: 'enginefixes', title: 'Engine Fixes', file: resolveCI(paths.dataDir, 'SKSE', 'Plugins', 'EngineFixes.toml'), toml: true, note: 'Only used if Engine Fixes is installed.' },
+    { id: 'displaytweaks', title: 'SSE Display Tweaks', file: resolveCI(paths.dataDir, 'SKSE', 'Plugins', 'SSEDisplayTweaks.ini'), note: 'Only used if SSE Display Tweaks is installed.' },
   ].map(c => ({ ...c, exists: exists(c.file) }));
 }
 

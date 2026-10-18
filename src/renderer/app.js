@@ -61,7 +61,8 @@ function copy(text) {
 }
 
 // ---------- state & routing ----------
-const state = { page: 'dashboard', valid: false, gameDir: null, hasNexusKey: false, timers: [] };
+const state = { page: 'dashboard', valid: false, gameDir: null, hasNexusKey: false, platform: 'win32', protonLauncher: null, timers: [] };
+const isLinux = () => state.platform === 'linux';
 
 function clearTimers() {
   state.timers.forEach(t => clearInterval(t));
@@ -95,7 +96,7 @@ async function renderNow() {
   try {
     await pages[state.page]();
   } catch (e) {
-    if (e.message !== 'NO_GAME') main().innerHTML = `<div class="empty">Something went wrong: ${esc(e.message)}</div>`;
+    if (e.message !== 'NO_GAME') main().innerHTML = `<div class="empty render-error">Something went wrong: ${esc(e.message)}</div>`;
   }
 }
 
@@ -113,7 +114,7 @@ function renderWelcome() {
   main().innerHTML = `<div class="welcome">
     <div class="brand-mark"><svg viewBox="0 0 32 32"><path d="M16 2 4 8v8c0 7 5 12 12 14 7-2 12-7 12-14V8L16 2Z" fill="none" stroke="currentColor" stroke-width="2"/><path d="M10 15h12M16 9v14" stroke="currentColor" stroke-width="2"/></svg></div>
     <h1>Welcome to STR Companion</h1>
-    <p>Point the app at your Skyrim Special Edition folder — the one with <b>SkyrimSE.exe</b> in it. It's usually<br><span class="mono">…\\steamapps\\common\\Skyrim Special Edition</span></p>
+    <p>Point the app at your Skyrim Special Edition folder — the one with <b>SkyrimSE.exe</b> in it. It's usually<br><span class="mono">${isLinux() ? '~/.local/share/Steam/steamapps/common/Skyrim Special Edition' : '…\\steamapps\\common\\Skyrim Special Edition'}</span></p>
     <p><button class="btn primary big" id="pick">Choose Skyrim folder</button></p>
   </div>`;
   $('#pick').addEventListener('click', async () => {
@@ -177,6 +178,7 @@ async function play() {
           ${st.vortex ? '<span class="pill warn">Vortex is open — avoid deploying while playing</span>' : ''}
         </div>
         <div class="row"><button class="btn primary big" id="launch">▶ Launch Skyrim Together</button></div>
+        ${isLinux() && state.protonLauncher === false ? `<div class="callout"><b>protontricks is needed on Linux</b> to start Skyrim Together inside Skyrim's Proton prefix. Install it from your distro or Flathub (<span class="mono">com.github.Matoking.protontricks</span>).</div>` : ''}
         <div class="callout blue"><b>Connecting:</b> In game, press <b>F2</b> (or Right-Ctrl) to open the Skyrim Together menu and use <b>Connect</b>. Friends enter your IP and port plus the join password.</div>
       </div>
       <div class="card">
@@ -194,7 +196,7 @@ async function play() {
       <div class="sub">
         1. Make sure the server says it started on port <b id="portLbl">10578</b> (see Logs → Server).<br>
         2. Forward that port (<b>UDP</b>) on your router to this PC, or use a VPN like Tailscale/ZeroTier and share that IP instead.<br>
-        3. Allow <b>SkyrimTogetherServer.exe</b> through Windows Firewall when it asks.<br>
+        3. ${isLinux() ? 'If you run a firewall (ufw, firewalld), allow that UDP port.' : 'Allow <b>SkyrimTogetherServer.exe</b> through Windows Firewall when it asks.'}<br>
         4. Everyone must have the same mods — compare setup codes on the <a href="#" id="toFriends">Friends Sync</a> page.
       </div>
     </div>`;
@@ -745,7 +747,7 @@ async function settings() {
     </div>
     <div class="card">
       <h2>Nexus Mods</h2>
-      <div class="sub">Your personal API key lets the app check for updates and read mod details. It's free — get it from your Nexus account's API keys page. It's stored encrypted with Windows' secure storage and only ever sent to nexusmods.com.
+      <div class="sub">Your personal API key lets the app check for updates and read mod details. It's free — get it from your Nexus account's API keys page. It's stored encrypted with ${isLinux() ? 'your system keyring' : "Windows' secure storage"} and only ever sent to nexusmods.com.
         ${nexus.premium ? '<br><b>Premium detected:</b> installs download directly.' : '<br>Free accounts: installs open the Nexus page, and the app picks up the file from your Downloads folder.'}</div>
       <div class="row" style="margin-top:10px">
         ${nexus.configured && !nexus.error ? `<span class="pill ok">✓ Connected as ${esc(nexus.name)}${nexus.premium ? ' (Premium)' : ''}</span>` : nexus.error ? `<span class="pill err">${esc(nexus.error)}</span>` : '<span class="pill">Not connected</span>'}
@@ -786,6 +788,8 @@ $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') $('#mo
   state.gameDir = init.gameDir;
   state.valid = init.valid;
   state.hasNexusKey = init.hasNexusKey;
+  state.platform = init.platform;
+  state.protonLauncher = init.protonLauncher;
   render();
   // Quietly check GitHub for a newer release; no network, no problem.
   api.call('app:checkUpdate').then(u => { state.update = u; updateFoot(); }).catch(() => {});

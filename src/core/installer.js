@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exists, readJson, writeJson, run, walkFiles, listDir } = require('./util');
+const { exists, readJson, writeJson, run, walkFiles, listDir, which } = require('./util');
 const plugins = require('./plugins');
 
 const DATA_DIRS = new Set(['meshes', 'textures', 'scripts', 'interface', 'sound', 'music', 'seq', 'skse', 'strings',
@@ -13,17 +13,26 @@ const ARCHIVE_EXT = /\.(7z|zip|rar)$/i;
 
 /** Full 7-Zip if installed (it can open .rar); otherwise the bundled 7za, which handles .7z and .zip. */
 function sevenZip() {
-  for (const base of [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean)) {
-    const full = path.join(base, '7-Zip', '7z.exe');
-    if (exists(full)) return { exe: full, rar: true };
+  if (process.platform === 'win32') {
+    for (const base of [process.env.ProgramFiles, process.env['ProgramFiles(x86)']].filter(Boolean)) {
+      const full = path.join(base, '7-Zip', '7z.exe');
+      if (exists(full)) return { exe: full, rar: true };
+    }
+  } else {
+    // 7zz is the official 7-Zip for Linux; 7z is p7zip, which reads .rar when its rar plugin is installed.
+    const full = which('7zz') || which('7z');
+    if (full) return { exe: full, rar: true };
   }
-  return { exe: require('7zip-bin').path7za.replace('app.asar', 'app.asar.unpacked'), rar: false };
+  const bundled = require('7zip-bin').path7za.replace('app.asar', 'app.asar.unpacked');
+  // Packaging can drop the executable bit on Linux.
+  if (process.platform !== 'win32') { try { fs.chmodSync(bundled, 0o755); } catch {} }
+  return { exe: bundled, rar: false };
 }
 
 async function extract(archive, destDir) {
   const zip = sevenZip();
   if (/\.rar$/i.test(archive) && !zip.rar) {
-    throw new Error('Opening .rar files needs 7-Zip (free, 7-zip.org). Install it, or install this mod with Vortex.');
+    throw new Error(process.platform === 'win32' ? 'Opening .rar files needs 7-Zip (free, 7-zip.org). Install it, or install this mod with Vortex.' : 'Opening .rar files needs 7-Zip: install the 7zip package (7zz) or p7zip with its rar plugin.');
   }
   fs.mkdirSync(destDir, { recursive: true });
   const r = await run(zip.exe, ['x', archive, `-o${destDir}`, '-y', '-bso0', '-bsp0']);

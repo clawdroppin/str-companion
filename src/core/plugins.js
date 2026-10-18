@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { readText, listDir, exists } = require('./util');
+const { readText, listDir, exists, resolveCI } = require('./util');
 
 const BASE_MASTERS = ['Skyrim.esm', 'Update.esm', 'Dawnguard.esm', 'HearthFires.esm', 'Dragonborn.esm'];
 
@@ -73,14 +73,14 @@ function writePluginsTxt(file, entries) {
 /** Removes plugins from Plugins.txt and loadorder.txt. Returns the names that were active. */
 function removeFromLists(localAppDir, names) {
   const lower = new Set(names.map(n => n.toLowerCase()));
-  const pluginsTxt = path.join(localAppDir, 'Plugins.txt');
+  const pluginsTxt = resolveCI(localAppDir, 'Plugins.txt');
   const wasActive = [];
   if (exists(pluginsTxt)) {
     const entries = readPluginsTxt(pluginsTxt);
     for (const e of entries) if (lower.has(e.name.toLowerCase()) && e.active) wasActive.push(e.name);
     writePluginsTxt(pluginsTxt, entries.filter(e => !lower.has(e.name.toLowerCase())));
   }
-  const lo = path.join(localAppDir, 'loadorder.txt');
+  const lo = resolveCI(localAppDir, 'loadorder.txt');
   if (exists(lo)) {
     const text = readText(lo, '');
     const kept = text.split(/\r?\n/).filter(l => l && !lower.has(l.trim().toLowerCase()));
@@ -91,7 +91,7 @@ function removeFromLists(localAppDir, names) {
 
 /** Adds plugins to the end of Plugins.txt as active (no-op for ones already listed). */
 function addToPluginsTxt(localAppDir, names) {
-  const file = path.join(localAppDir, 'Plugins.txt');
+  const file = resolveCI(localAppDir, 'Plugins.txt');
   const entries = exists(file) ? readPluginsTxt(file) : [];
   for (const n of names) {
     const hit = entries.find(e => e.name.toLowerCase() === n.toLowerCase());
@@ -103,7 +103,7 @@ function addToPluginsTxt(localAppDir, names) {
 }
 
 function readCcc(gameDir) {
-  return readText(path.join(gameDir, 'Skyrim.ccc'), '')
+  return readText(resolveCI(gameDir, 'Skyrim.ccc'), '')
     .split(/\r?\n/).map(s => s.trim()).filter(Boolean);
 }
 
@@ -112,7 +112,7 @@ function readCcc(gameDir) {
  * base masters, then Creation Club files listed in Skyrim.ccc that exist, then Plugins.txt actives.
  */
 function effectiveLoadOrder(gameDir, localAppDir) {
-  const dataDir = path.join(gameDir, 'Data');
+  const dataDir = resolveCI(gameDir, 'Data');
   const onDisk = new Map();
   for (const e of listDir(dataDir)) if (e.isFile() && PLUGIN_RE.test(e.name)) onDisk.set(e.name.toLowerCase(), e.name);
 
@@ -126,7 +126,7 @@ function effectiveLoadOrder(gameDir, localAppDir) {
   };
   BASE_MASTERS.forEach(n => push(n, 'base'));
   readCcc(gameDir).forEach(n => push(n, 'creation-club'));
-  const listed = readPluginsTxt(path.join(localAppDir, 'Plugins.txt'));
+  const listed = readPluginsTxt(resolveCI(localAppDir, 'Plugins.txt'));
   // Masters (ESM / ESL-flagged ESM) load before regular plugins regardless of list order.
   const actives = listed.filter(e => e.active && onDisk.has(e.name.toLowerCase()));
   const withHeaders = actives.map(e => ({ e, h: readHeader(path.join(dataDir, onDisk.get(e.name.toLowerCase()))) }));
@@ -139,7 +139,7 @@ function effectiveLoadOrder(gameDir, localAppDir) {
 
 /** For every loaded plugin, lists masters that are missing or load after it. */
 function checkMasters(gameDir, order) {
-  const dataDir = path.join(gameDir, 'Data');
+  const dataDir = resolveCI(gameDir, 'Data');
   const pos = new Map(order.map((p, i) => [p.name.toLowerCase(), i]));
   const problems = [];
   order.forEach((p, i) => {
@@ -172,7 +172,7 @@ function isFreeCc(name) {
 
 /** Creation Club plugins present in Data, with their archives. */
 function creationClubFiles(gameDir) {
-  const dataDir = path.join(gameDir, 'Data');
+  const dataDir = resolveCI(gameDir, 'Data');
   const ccc = new Set(readCcc(gameDir).map(s => s.toLowerCase()));
   return listDir(dataDir)
     .filter(e => e.isFile() && PLUGIN_RE.test(e.name) && !PROTECTED.has(e.name.toLowerCase())

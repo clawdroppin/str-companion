@@ -14,50 +14,10 @@ const share = require('../src/core/share');
 const configs = require('../src/core/configs');
 const cleanup = require('../src/core/cleanup');
 const health = require('../src/core/health');
-const { run } = require('../src/core/util');
+const util = require('../src/core/util');
+const { run } = util;
 
-/** Minimal TES4 header with the given masters and flags. */
-function pluginBytes(masters = [], flags = 0) {
-  const subs = [];
-  const sub = (type, data) => {
-    const h = Buffer.alloc(6);
-    h.write(type, 0, 'latin1');
-    h.writeUInt16LE(data.length, 4);
-    subs.push(h, data);
-  };
-  sub('HEDR', Buffer.alloc(12));
-  sub('CNAM', Buffer.from('Tester\0', 'latin1'));
-  for (const m of masters) { sub('MAST', Buffer.from(m + '\0', 'latin1')); sub('DATA', Buffer.alloc(8)); }
-  const body = Buffer.concat(subs);
-  const head = Buffer.alloc(24);
-  head.write('TES4', 0, 'latin1');
-  head.writeUInt32LE(body.length, 4);
-  head.writeUInt32LE(flags, 8);
-  return Buffer.concat([head, body]);
-}
-
-function fakeGame() {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'strc-test-'));
-  const gameDir = path.join(root, 'steamapps', 'common', 'Skyrim Special Edition');
-  const data = path.join(gameDir, 'Data');
-  fs.mkdirSync(data, { recursive: true });
-  fs.writeFileSync(path.join(gameDir, 'SkyrimSE.exe'), 'x');
-  for (const m of plugins.BASE_MASTERS) fs.writeFileSync(path.join(data, m), pluginBytes(m === 'Skyrim.esm' ? [] : ['Skyrim.esm'], 1));
-  const cc = ['ccBGSSSE001-Fish.esm', 'ccQDRSSE001-SurvivalMode.esl', 'ccBGSSSE037-Curios.esl', 'ccBGSSSE025-AdvDSGS.esm', '_ResourcePack.esl', 'ccBGSSSE002-ExoticArrows.esl'];
-  fs.writeFileSync(path.join(gameDir, 'Skyrim.ccc'), cc.join('\r\n') + '\r\n');
-  for (const c of cc) {
-    fs.writeFileSync(path.join(data, c), pluginBytes(['Skyrim.esm'], 1));
-    fs.writeFileSync(path.join(data, c.replace(/\.es[ml]$/, '.bsa')), 'bsa');
-  }
-  fs.writeFileSync(path.join(data, 'USSEP.esp'), pluginBytes(['Skyrim.esm', 'ccBGSSSE001-Fish.esm']));
-  fs.writeFileSync(path.join(data, 'USSEP - Textures.bsa'), 'bsa');
-  fs.writeFileSync(path.join(data, 'Addon.esp'), pluginBytes(['Skyrim.esm', 'USSEP.esp']));
-  const local = path.join(root, 'local', 'Skyrim Special Edition');
-  fs.mkdirSync(local, { recursive: true });
-  fs.writeFileSync(path.join(local, 'Plugins.txt'), '# This file is used by Skyrim\r\n*USSEP.esp\r\n*Addon.esp\r\n');
-  const paths = game.gamePaths(gameDir, { documentsDir: path.join(root, 'docs'), localAppData: path.join(root, 'local') });
-  return { root, paths };
-}
+const { pluginBytes, fakeGame } = require('./fixtures');
 
 test('ini round-trips byte for byte and edits in place', () => {
   const text = '[general]\r\n; How much detail\r\nsLogLevel=info\r\n\r\n[Gameplay]\r\nbEnablePvp=false\r\n';
@@ -89,7 +49,7 @@ test('reads plugin masters and flags', () => {
 test('load order puts base, then Creation Club, then Plugins.txt; masters check passes', () => {
   const { paths } = fakeGame();
   const { order } = plugins.effectiveLoadOrder(paths.gameDir, paths.localAppDir);
-  assert.deepStrictEqual(order.map(o => o.name).slice(-3), ['ccBGSSSE002-ExoticArrows.esl', 'USSEP.esp', 'Addon.esp']);
+  assert.deepStrictEqual(order.map(o => o.name).slice(-5), ['ccBGSSSE002-ExoticArrows.esl', 'USSEP.esp', 'Addon.esp', 'SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp']);
   assert.deepStrictEqual(plugins.checkMasters(paths.gameDir, order), []);
 });
 
@@ -273,4 +233,50 @@ test('config save snapshots the old file and presets apply', () => {
   assert.match(after, /uMaxPlayerCount=3/);
   assert.match(after, /bEnablePvp=false/);
   assert.match(after, /\r\n/);
+});
+
+// ---------- Linux / Proton ----------
+
+test('Linux: game paths resolve inside the Proton prefix', () => {
+  const { paths } = fakeGame({ proton: true });
+  const norm = p => p.split(path.sep).join('/');
+  assert.match(norm(paths.localAppDir), /compatdata\/489830\/pfx\/drive_c\/users\/steamuser\/AppData\/Local\/Skyrim Special Edition$/);
+  assert.match(norm(paths.myGames), /steamuser\/Documents\/My Games\/Skyrim Special Edition$/);
+  const snap = health.snapshot(paths);
+  assert.strictEqual(snap.gameVersion, '1.6.1170');
+  assert.strictEqual(snap.skse.version, '2.2.6');
+  assert.ok(snap.addressLibrary.matchesGame);
+  assert.ok(snap.str.installed);
+  assert.strictEqual(snap.str.version, '1.8.3');
+  assert.deepStrictEqual(snap.masterProblems, []);
+  assert.strictEqual(configs.load(paths, 'prefs').entries.find(e => e.key === 'bBorderless').value, '0');
+});
+
+test('Linux: older Proton folder names are found', () => {
+  const { root } = fakeGame({ proton: true });
+  const user = game.protonUserDir(path.join(root, 'steamapps'));
+  fs.renameSync(path.join(user, 'Documents'), path.join(user, 'My Documents'));
+  const paths = game.gamePaths(path.join(root, 'steamapps', 'common', 'Skyrim Special Edition'), { platform: 'linux' });
+  assert.match(paths.myGames.split(path.sep).join('/'), /My Documents\/My Games/);
+});
+
+test('case-insensitive files: lowercase plugins.txt and data folder still work', () => {
+  const { paths } = fakeGame({ lowercasePluginsTxt: true });
+  const { order } = plugins.effectiveLoadOrder(paths.gameDir, paths.localAppDir);
+  assert.ok(order.some(p => p.name === 'USSEP.esp'), 'reads lowercase plugins.txt');
+  plugins.addToPluginsTxt(paths.localAppDir, ['New.esp']);
+  assert.ok(!fs.existsSync(path.join(paths.localAppDir, 'Plugins.txt')) || process.platform === 'win32', 'did not create a second, differently-cased file');
+  assert.match(fs.readFileSync(path.join(paths.localAppDir, 'plugins.txt'), 'utf8'), /\*New\.esp/);
+});
+
+test('resolveCI and parsePsOutput', () => {
+  const { paths } = fakeGame();
+  assert.strictEqual(util.resolveCI(paths.gameDir, 'DATA', 'skse', 'PLUGINS'), path.join(paths.gameDir, 'Data', 'SKSE', 'Plugins'));
+  assert.strictEqual(util.resolveCI(paths.gameDir, 'NotThere', 'x'), path.join(paths.gameDir, 'NotThere', 'x'));
+  const names = util.parsePsOutput([
+    '/home/me/.local/share/Steam/ubuntu12_32/steam -srt-logger-opened',
+    String.raw`Z:\home\me\.local\share\Steam\steamapps\common\Skyrim Special Edition\SkyrimSE.exe`,
+    '/usr/bin/wine /games/Skyrim Special Edition/Data/SkyrimTogetherReborn/SkyrimTogetherServer.exe',
+  ].join('\n'));
+  for (const n of ['steam', 'skyrimse.exe', 'skyrimtogetherserver.exe']) assert.ok(names.has(n), n);
 });

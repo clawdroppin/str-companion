@@ -1,14 +1,15 @@
 {
   "name": "str-companion",
   "productName": "STR Companion",
-  "version": "1.0.0",
-  "description": "Setup, cleanup, config and launch companion for Skyrim Together Reborn co-op.",
+  "version": "1.1.0",
+  "description": "Setup, cleanup, config and launch companion for Skyrim Together Reborn co-op (Windows and Linux).",
   "main": "src/main/main.js",
   "private": true,
   "scripts": {
     "start": "electron .",
     "test": "node --test test/*.test.js",
-    "dist": "electron-builder --win portable"
+    "dist": "electron-builder --win portable",
+    "dist:linux": "electron-builder --linux AppImage tar.gz"
   },
   "dependencies": {
     "7zip-bin": "^5.2.0"
@@ -29,19 +30,37 @@
       "node_modules/7zip-bin/**/*"
     ],
     "win": {
-      "target": "portable"
+      "target": "portable",
+      "icon": "build/icon.png"
     },
     "portable": {
       "artifactName": "STR-Companion-${version}.exe"
+    },
+    "directories": {
+      "buildResources": "build"
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "tar.gz"
+      ],
+      "category": "Game",
+      "icon": "build/icon.png",
+      "synopsis": "Skyrim Together Reborn co-op companion",
+      "artifactName": "STR-Companion-${version}-linux-${arch}.${ext}"
     }
   },
   "allowScripts": {
     "electron@33.4.11": true
   },
   "license": "MIT",
-  "author": "clawdroppin",
+  "author": {
+    "name": "clawdroppin",
+    "email": "69279861+clawdroppin@users.noreply.github.com"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/clawdroppin/str-companion.git"
-  }
+  },
+  "homepage": "https://github.com/clawdroppin/str-companion"
 }

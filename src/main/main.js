@@ -24,7 +24,10 @@ const appDataDir = () => app.getPath('userData');
 const settingsFile = () => path.join(appDataDir(), 'settings.json');
 
 function loadSettings() {
-  return util.readJson(settingsFile(), { gameDir: null, playerName: os.userInfo().username, customMods: [], checklist: {} });
+  const s = util.readJson(settingsFile(), { gameDir: null, playerName: os.userInfo().username, customMods: [], checklist: {} });
+  // Tests and CI point the app at a fake game folder without touching saved settings.
+  if (process.env.STRC_GAME_DIR) s.gameDir = process.env.STRC_GAME_DIR;
+  return s;
 }
 function saveSettings(s) {
   util.writeJson(settingsFile(), s);
@@ -44,7 +47,8 @@ function nexusKey() {
 function ctx() {
   const s = loadSettings();
   if (!s.gameDir || !game.isGameDir(s.gameDir)) throw new Error('NO_GAME');
-  const paths = game.gamePaths(s.gameDir, { documentsDir: app.getPath('documents') });
+  // On Linux the game's Documents folder is inside the Proton prefix, which gamePaths works out itself.
+  const paths = game.gamePaths(s.gameDir, process.platform === 'win32' ? { documentsDir: app.getPath('documents') } : {});
   const backups = new BackupStore(paths);
   return { s, paths, backups, installer: new Installer(paths, appDataDir(), backups), nexus: new Nexus(nexusKey()) };
 }
@@ -81,7 +85,11 @@ handle('app:init', async () => {
   if (!s.gameDir && detected.length) { s.gameDir = detected[0]; saveSettings(s); }
   const valid = !!s.gameDir && game.isGameDir(s.gameDir);
   if (valid) adoptLegacyBackups(ctx());
-  return { gameDir: s.gameDir, valid, detected, playerName: s.playerName, hasNexusKey: !!nexusKey(), version: app.getVersion() };
+  return {
+    gameDir: s.gameDir, valid, detected, playerName: s.playerName, hasNexusKey: !!nexusKey(), version: app.getVersion(),
+    platform: process.platform,
+    protonLauncher: process.platform === 'win32' ? null : !!launch.protonLauncher(),
+  };
 });
 
 handle('game:pickDir', async () => {
@@ -158,7 +166,7 @@ handle('cleanup:setActive', (name, active) => {
   const c = ctx();
   if (active) plugins.addToPluginsTxt(c.paths.localAppDir, [name]);
   else {
-    const file = path.join(c.paths.localAppDir, 'Plugins.txt');
+    const file = util.resolveCI(c.paths.localAppDir, 'Plugins.txt');
     const entries = plugins.readPluginsTxt(file).map(e => e.name.toLowerCase() === name.toLowerCase() ? { ...e, active: false } : e);
     plugins.writePluginsTxt(file, entries);
   }
@@ -297,7 +305,7 @@ handle('nexus:setKey', async key => {
   key = String(key || '').trim();
   if (!key) { updateSettings({ nexusKeyEnc: null }); return { cleared: true }; }
   const user = await new Nexus(key).validate();
-  if (!safeStorage.isEncryptionAvailable()) throw new Error('Windows secure storage is unavailable, so the key cannot be saved safely.');
+  if (!safeStorage.isEncryptionAvailable()) throw new Error(process.platform === 'win32' ? 'Windows secure storage is unavailable, so the key cannot be saved safely.' : 'No system keyring is available (install gnome-keyring or KWallet), so the key cannot be saved safely.');
   updateSettings({ nexusKeyEnc: safeStorage.encryptString(key).toString('base64') });
   return { name: user.name, premium: !!user.is_premium };
 });
@@ -408,6 +416,8 @@ function createWindow() {
     backgroundColor: '#14120f',
     title: 'STR Companion',
     autoHideMenuBar: true,
+    // Windows takes the icon from the exe; Linux window managers need it set on the window.
+    icon: process.platform === 'win32' ? undefined : path.join(__dirname, '..', 'renderer', 'icon.png'),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -440,12 +450,16 @@ function captureAllPages(dir) {
       await wait(200);
       const img = await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
       fs.writeFileSync(path.join(dir, `${p}.png`), img.toPNG());
-      report[p] = await win.webContents.executeJavaScript(`({ h1: document.querySelector('main h1')?.textContent, error: document.querySelector('main .empty')?.textContent || null })`);
+      report[p] = await win.webContents.executeJavaScript(`({ h1: document.querySelector('main h1')?.textContent, error: document.querySelector('main .render-error')?.textContent || null })`);
     }
     fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2));
     app.quit();
   });
 }
+
+// Screenshot/test runs get their own profile, so they never touch real settings and can run next to
+// an open copy of the app.
+if (process.env.STRC_SHOTS) app.setPath('userData', path.join(os.tmpdir(), `strc-shots-profile-${process.pid}`));
 
 // One window only: a second launch focuses the first (two copies would fight over the same files).
 if (!app.requestSingleInstanceLock()) {

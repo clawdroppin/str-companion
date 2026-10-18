@@ -1,29 +1,61 @@
 'use strict';
 const path = require('path');
 const os = require('os');
-const { exists, readText, readJson, listDir, findCaseInsensitive, peFileVersion, shortVersion, run } = require('./util');
+const { exists, readText, readJson, listDir, findCaseInsensitive, resolveCI, peFileVersion, shortVersion, run } = require('./util');
 
 const APP_ID = '489830';
 
-/** Folders the game uses outside its install directory. */
+/**
+ * The Windows user folder inside Proton's prefix for Skyrim on Linux:
+ * <library>/steamapps/compatdata/489830/pfx/drive_c/users/steamuser
+ */
+function protonUserDir(steamappsDir) {
+  return path.join(steamappsDir, 'compatdata', APP_ID, 'pfx', 'drive_c', 'users', 'steamuser');
+}
+
+/** First of several candidate folder names that exists (older Proton used different names). */
+function firstExisting(base, candidates) {
+  for (const c of candidates) {
+    const p = resolveCI(base, ...c);
+    if (exists(p)) return p;
+  }
+  return resolveCI(base, ...candidates[0]);
+}
+
+/**
+ * Folders the game uses outside its install directory. On Windows these are the real Documents and
+ * LocalAppData; on Linux they live inside the Proton prefix next to the game's Steam library.
+ */
 function gamePaths(gameDir, env = {}) {
-  const documents = env.documentsDir || path.join(os.homedir(), 'Documents');
-  const localAppData = env.localAppData || process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  const myGames = path.join(documents, 'My Games', 'Skyrim Special Edition');
+  const platform = env.platform || process.platform;
+  const steamappsDir = path.resolve(gameDir, '..', '..');
+  let documents = env.documentsDir;
+  let localAppData = env.localAppData;
+  if (platform !== 'win32') {
+    const user = protonUserDir(steamappsDir);
+    documents = documents || firstExisting(user, [['Documents'], ['My Documents']]);
+    localAppData = localAppData || firstExisting(user, [['AppData', 'Local'], ['Local Settings', 'Application Data']]);
+  } else {
+    documents = documents || path.join(os.homedir(), 'Documents');
+    localAppData = localAppData || process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  }
+  const myGames = resolveCI(documents, 'My Games', 'Skyrim Special Edition');
+  const dataDir = resolveCI(gameDir, 'Data');
   return {
+    platform,
     gameDir,
-    dataDir: path.join(gameDir, 'Data'),
-    strDir: path.join(gameDir, 'Data', 'SkyrimTogetherReborn'),
+    dataDir,
+    strDir: resolveCI(dataDir, 'SkyrimTogetherReborn'),
     myGames,
-    skseLogs: path.join(myGames, 'SKSE'),
-    saves: path.join(myGames, 'Saves'),
-    localAppDir: path.join(localAppData, 'Skyrim Special Edition'),
-    steamappsDir: path.resolve(gameDir, '..', '..'),
+    skseLogs: resolveCI(myGames, 'SKSE'),
+    saves: resolveCI(myGames, 'Saves'),
+    localAppDir: resolveCI(localAppData, 'Skyrim Special Edition'),
+    steamappsDir,
   };
 }
 
 function isGameDir(dir) {
-  return !!dir && exists(path.join(dir, 'SkyrimSE.exe')) && exists(path.join(dir, 'Data'));
+  return !!dir && !!findCaseInsensitive(dir, 'SkyrimSE.exe') && !!findCaseInsensitive(dir, 'Data');
 }
 
 /** Parses Steam's libraryfolders.vdf for library paths. */
@@ -34,21 +66,39 @@ function steamLibraries(steamPath) {
   return [...new Set(libs.map(p => path.normalize(p)))];
 }
 
-async function steamPath() {
-  const r = await run('reg', ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath']);
-  const m = r.stdout.match(/SteamPath\s+REG_SZ\s+(.+)/);
-  if (m) return path.normalize(m[1].trim());
-  for (const p of ['C:\\Program Files (x86)\\Steam', 'C:\\Program Files\\Steam']) if (exists(p)) return p;
-  return null;
+/** Steam's install folders: from the registry on Windows; the usual native/Flatpak/Snap spots on Linux. */
+async function steamPaths() {
+  if (process.platform === 'win32') {
+    const r = await run('reg', ['query', 'HKCU\\Software\\Valve\\Steam', '/v', 'SteamPath']);
+    const m = r.stdout.match(/SteamPath\s+REG_SZ\s+(.+)/);
+    const found = m ? [path.normalize(m[1].trim())] : [];
+    return found.concat(['C:\\Program Files (x86)\\Steam', 'C:\\Program Files\\Steam'].filter(exists));
+  }
+  const home = os.homedir();
+  return [
+    ['.steam', 'steam'],
+    ['.local', 'share', 'Steam'],
+    ['.var', 'app', 'com.valvesoftware.Steam', '.local', 'share', 'Steam'],
+    ['snap', 'steam', 'common', '.local', 'share', 'Steam'],
+  ].map(p => path.join(home, ...p)).filter(p => exists(path.join(p, 'steamapps')));
 }
 
 /** Looks through every Steam library for Skyrim Special Edition. */
 async function detectGameDirs() {
-  const sp = await steamPath();
-  if (!sp) return [];
-  return steamLibraries(sp)
-    .map(lib => path.join(lib, 'steamapps', 'common', 'Skyrim Special Edition'))
+  const libs = new Set();
+  for (const sp of await steamPaths()) for (const lib of steamLibraries(sp)) libs.add(lib);
+  const dirs = [...libs]
+    .map(lib => resolveCI(lib, 'steamapps', 'common', 'Skyrim Special Edition'))
     .filter(isGameDir);
+  // ~/.steam/steam is usually a symlink to ~/.local/share/Steam, so the same game can show up twice.
+  const seen = new Set();
+  return dirs.filter(d => {
+    let real = d;
+    try { real = require('fs').realpathSync(d); } catch {}
+    if (seen.has(real)) return false;
+    seen.add(real);
+    return true;
+  });
 }
 
 function steamManifestPath(paths) {
@@ -67,13 +117,14 @@ function steamAutoUpdate(paths) {
 
 function skseInfo(paths) {
   const dlls = listDir(paths.gameDir).filter(e => /^skse64_\d+_\d+_\d+\.dll$/i.test(e.name)).map(e => e.name);
-  const loader = exists(path.join(paths.gameDir, 'skse64_loader.exe'));
+  const loaderPath = findCaseInsensitive(paths.gameDir, 'skse64_loader.exe');
+  const loader = !!loaderPath;
   const builtFor = dlls.map(d => d.match(/skse64_(\d+)_(\d+)_(\d+)/i).slice(1).join('.'));
   return {
     installed: loader && dlls.length > 0,
     loader,
     builtFor,
-    version: loader ? skseVersionString(peFileVersion(path.join(paths.gameDir, 'skse64_loader.exe'))) : null,
+    version: loader ? skseVersionString(peFileVersion(loaderPath)) : null,
   };
 }
 
@@ -85,7 +136,7 @@ function skseVersionString(v) {
 }
 
 function addressLibraryInfo(paths, gameVersion) {
-  const dir = path.join(paths.dataDir, 'SKSE', 'Plugins');
+  const dir = resolveCI(paths.dataDir, 'SKSE', 'Plugins');
   const files = listDir(dir).filter(e => /^version(lib)?-[\d-]+\.bin$/i.test(e.name)).map(e => e.name);
   const want = gameVersion ? gameVersion.split('.').concat(['0', '0', '0', '0']).slice(0, 4).join('-') : null;
   const match = want ? files.find(f => f.toLowerCase().startsWith(`versionlib-${want}`)) : null;
@@ -109,14 +160,14 @@ function strInfo(paths, vortexMods = []) {
     version,
     exe,
     server: findCaseInsensitive(paths.strDir, 'SkyrimTogetherServer.exe'),
-    plugins: ['SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp'].filter(p => exists(path.join(paths.dataDir, p))),
-    configFile: path.join(paths.strDir, 'config', 'STServer.ini'),
+    plugins: ['SkyrimTogether.esp', 'SkyrimTogetherQuestPatches.esp'].filter(p => findCaseInsensitive(paths.dataDir, p)),
+    configFile: resolveCI(paths.strDir, 'config', 'STServer.ini'),
   };
 }
 
 /** SKSE plugin DLLs installed in Data/SKSE/Plugins. */
 function sksePlugins(paths) {
-  return listDir(path.join(paths.dataDir, 'SKSE', 'Plugins'))
+  return listDir(resolveCI(paths.dataDir, 'SKSE', 'Plugins'))
     .filter(e => e.isFile() && /\.dll$/i.test(e.name))
     .map(e => e.name);
 }
@@ -178,7 +229,7 @@ function modManager(paths) {
 }
 
 module.exports = {
-  APP_ID, gamePaths, isGameDir, detectGameDirs, steamPath, steamManifestPath, steamAutoUpdate,
+  APP_ID, gamePaths, protonUserDir, isGameDir, detectGameDirs, steamPaths, steamManifestPath, steamAutoUpdate,
   skseInfo, addressLibraryInfo, strInfo, sksePlugins, rootHooks, vortexMods, parseModFolderName, modManager,
-  gameVersion: paths => shortVersion(peFileVersion(path.join(paths.gameDir, 'SkyrimSE.exe'))),
+  gameVersion: paths => shortVersion(peFileVersion(resolveCI(paths.gameDir, 'SkyrimSE.exe'))),
 };

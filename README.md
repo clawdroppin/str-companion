@@ -7,7 +7,8 @@
 Get your whole group onto the same setup, fix what breaks co-op, and play the campaign together, without digging through INI files and log folders.
 
 [![Release](https://img.shields.io/github/v/release/clawdroppin/str-companion?style=flat-square&color=d2ac5c)](https://github.com/clawdroppin/str-companion/releases/latest)
-![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-2a251e?style=flat-square)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Steam%20Deck-2a251e?style=flat-square)
+[![CI](https://img.shields.io/github/actions/workflow/status/clawdroppin/str-companion/ci.yml?branch=main&style=flat-square&label=tests)](https://github.com/clawdroppin/str-companion/actions)
 ![Skyrim](https://img.shields.io/badge/Skyrim-Special%20Edition%20(Steam)-2a251e?style=flat-square)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2a251e?style=flat-square)](LICENSE)
 
@@ -19,10 +20,27 @@ Get your whole group onto the same setup, fix what breaks co-op, and play the ca
 
 ## ⬇️ Download
 
-1. Go to **[Releases](https://github.com/clawdroppin/str-companion/releases/latest)** and download **`STR-Companion-x.y.z.exe`**.
-2. Run it. It's portable, so there's nothing to install.
-   - Windows may show **"Windows protected your PC"** because the app isn't code-signed. Click **More info → Run anyway**.
-3. The app finds Skyrim automatically through Steam. If it doesn't, point it at the folder that contains `SkyrimSE.exe`.
+Get the latest version from **[Releases](https://github.com/clawdroppin/str-companion/releases/latest)**. Every build is portable, so there's nothing to install.
+
+### 🪟 Windows
+1. Download **`STR-Companion-x.y.z.exe`** and run it.
+2. Windows may show **"Windows protected your PC"** because the app isn't code-signed. Click **More info → Run anyway**.
+
+### 🐧 Linux / Steam Deck
+Skyrim runs through **Proton**. The app finds the game in your Steam library (native, Flatpak or Snap Steam) and reads saves, `Plugins.txt` and INIs from inside the Proton prefix automatically.
+
+1. Download **`STR-Companion-x.y.z-linux-x86_64.AppImage`**, then:
+   ```bash
+   chmod +x STR-Companion-*.AppImage
+   ./STR-Companion-*.AppImage
+   ```
+   If it won't start on Ubuntu 22.04+, install FUSE 2 (`sudo apt install libfuse2`) or use the `.tar.gz` instead: extract it and run `str-companion`.
+2. To **launch Skyrim Together and the server** from the app, install **[protontricks](https://github.com/Matoking/protontricks)** (from your distro, or Flathub `com.github.Matoking.protontricks`). It starts the Windows programs inside Skyrim's Proton prefix. The server also runs with plain Wine if you have it.
+3. On **Steam Deck**, use Desktop Mode.
+4. Optional: install `7zip` (or `p7zip` with its rar plugin) to install `.rar` mods.
+
+### First run
+The app finds Skyrim through Steam. If it doesn't, point it at the folder that contains `SkyrimSE.exe`.
 
 > **Everyone in your group should use it.** The best part is **Friends Sync**, which shows exactly what's different between your setups.
 
@@ -47,7 +65,7 @@ Get your whole group onto the same setup, fix what breaks co-op, and play the ca
 - Config files are **snapshotted before every save**.
 - Base-game files and the plugins Skyrim Together needs are **locked** and can't be moved.
 - INI saves are **blocked while Skyrim is running**, because the game would overwrite them on exit.
-- Your Nexus API key is stored encrypted with Windows' secure storage and only sent to `nexusmods.com`.
+- Your Nexus API key is stored encrypted (Windows secure storage, or your Linux keyring) and only sent to `nexusmods.com`.
 
 <details>
 <summary><b>📸 More screenshots</b></summary>
@@ -107,14 +125,17 @@ SKSE and Skyrim Together need updates for each new game version. The Dashboard c
 
 ## 🛠️ Building from source
 
-Requires **Node.js 20+** on Windows.
+Requires **Node.js 20+**.
 
 ```bash
 npm install
-npm start          # run the app
-npm test           # unit tests (use a fake game folder in %TEMP%, never your real install)
-npm run dist       # build the portable exe into dist/
+npm start            # run the app
+npm test             # unit tests (fake game folders in your temp dir, never your real install)
+npm run dist         # Windows portable exe -> dist/
+npm run dist:linux   # Linux AppImage + tar.gz -> dist/ (build on Linux)
 ```
+
+Every push runs the tests on Windows and Linux in [GitHub Actions](.github/workflows/ci.yml). That includes a Linux UI smoke test that opens every page against a fake Proton install. Publishing a GitHub release builds and attaches the Windows and Linux downloads automatically.
 
 Contributors and AI agents: read **[AGENTS.md](AGENTS.md)** first. It covers the architecture, the safety rules the code relies on, and how to verify the UI.
 

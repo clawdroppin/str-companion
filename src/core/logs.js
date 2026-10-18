@@ -1,7 +1,7 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const { readText, exists } = require('./util');
+const { readText, exists, resolveCI } = require('./util');
 
 function mtime(p) {
   try { return fs.statSync(p).mtime.toISOString(); } catch { return null; }
@@ -9,7 +9,7 @@ function mtime(p) {
 
 /** Players currently on the server, read from the latest server session in STServerOut.log. */
 function serverSession(paths) {
-  const file = path.join(paths.strDir, 'logs', 'STServerOut.log');
+  const file = resolveCI(paths.strDir, 'logs', 'STServerOut.log');
   const text = readText(file, '');
   const players = new Map();
   const events = [];
@@ -37,7 +37,7 @@ function serverSession(paths) {
 
 /** Warnings/errors from the Skyrim Together client log, minus known-harmless noise. */
 function clientLog(paths) {
-  const file = path.join(paths.strDir, 'logs', 'tp_client.log');
+  const file = resolveCI(paths.strDir, 'logs', 'tp_client.log');
   const text = readText(file, '');
   const all = text.split(/\r?\n/);
   // The log spans several launches; only the latest one matters.
@@ -59,7 +59,7 @@ function clientLog(paths) {
 
 /** Which SKSE plugins loaded during the last launch, from skse64.log. */
 function sksePluginResults(paths) {
-  const file = path.join(paths.skseLogs, 'skse64.log');
+  const file = resolveCI(paths.skseLogs, 'skse64.log');
   const text = readText(file, '');
   const results = [];
   for (const line of text.split(/\r?\n/)) {
@@ -78,11 +78,11 @@ function tail(file, n = 200) {
 
 function logFiles(paths) {
   return [
-    { id: 'server', title: 'Server', file: path.join(paths.strDir, 'logs', 'STServerOut.log') },
-    { id: 'client', title: 'Skyrim Together client', file: path.join(paths.strDir, 'logs', 'tp_client.log') },
-    { id: 'skse', title: 'SKSE', file: path.join(paths.skseLogs, 'skse64.log') },
-    { id: 'skseloader', title: 'SKSE loader', file: path.join(paths.skseLogs, 'skse64_loader.log') },
-    { id: 'enginefixes', title: 'Engine Fixes', file: path.join(paths.skseLogs, 'EngineFixes.log') },
+    { id: 'server', title: 'Server', file: resolveCI(paths.strDir, 'logs', 'STServerOut.log') },
+    { id: 'client', title: 'Skyrim Together client', file: resolveCI(paths.strDir, 'logs', 'tp_client.log') },
+    { id: 'skse', title: 'SKSE', file: resolveCI(paths.skseLogs, 'skse64.log') },
+    { id: 'skseloader', title: 'SKSE loader', file: resolveCI(paths.skseLogs, 'skse64_loader.log') },
+    { id: 'enginefixes', title: 'Engine Fixes', file: resolveCI(paths.skseLogs, 'EngineFixes.log') },
   ].map(l => ({ ...l, exists: exists(l.file), updatedAt: mtime(l.file) }));
 }
 
