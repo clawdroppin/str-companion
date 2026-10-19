@@ -17,7 +17,8 @@ const share = require('../core/share');
 const mods = require('../core/mods');
 const { BackupStore } = require('../core/backup');
 const { Installer, ARCHIVE_EXT } = require('../core/installer');
-const { Nexus, modUrl, parseModRef, download } = require('../core/nexus');
+const { Nexus, modUrl, fileDownloadUrl, parseModRef, download, GAME } = require('../core/nexus');
+const setup = require('../core/setup');
 const { IniDoc } = require('../core/ini');
 
 let win;
@@ -325,33 +326,42 @@ handle('mods:installArchive', async (file, meta) => ctx().installer.installArchi
 handle('mods:uninstall', key => ctx().installer.uninstall(key));
 handle('mods:registry', () => ctx().installer.registry());
 
-// Watches the Downloads folder after the user starts a Nexus manual download, so the file can be installed in one click.
-let watchTimer = null;
-handle('downloads:watch', (modId, name) => {
+/**
+ * Waits for a new mod archive to finish downloading into the Downloads folder (its size stops changing).
+ * Returns { promise, cancel }; the promise resolves to { file, size } or rejects on cancel/timeout.
+ */
+function watchDownloads(timeoutMs = 15 * 60 * 1000) {
   const dir = app.getPath('downloads');
   const started = Date.now();
   const sizes = new Map();
-  clearInterval(watchTimer);
-  watchTimer = setInterval(() => {
-    if (Date.now() - started > 15 * 60 * 1000) { clearInterval(watchTimer); return; }
-    for (const e of util.listDir(dir)) {
-      if (!e.isFile() || !ARCHIVE_EXT.test(e.name)) continue;
-      const full = path.join(dir, e.name);
-      let st;
-      try { st = fs.statSync(full); } catch { continue; }
-      if (st.mtimeMs < started - 5000) continue;
-      // Only report once the size has stopped changing (download finished).
-      if (sizes.get(full) === st.size && st.size > 0) {
-        clearInterval(watchTimer);
-        send('download:found', { file: full, modId, name, size: st.size });
-        return;
+  let timer, rejectFn;
+  const promise = new Promise((resolve, reject) => {
+    rejectFn = reject;
+    timer = setInterval(() => {
+      if (Date.now() - started > timeoutMs) { clearInterval(timer); reject(new Error('Gave up waiting for the download')); return; }
+      for (const e of util.listDir(dir)) {
+        if (!e.isFile() || !ARCHIVE_EXT.test(e.name)) continue;
+        const full = path.join(dir, e.name);
+        let st;
+        try { st = fs.statSync(full); } catch { continue; }
+        if (st.mtimeMs < started - 5000) continue;
+        if (sizes.get(full) === st.size && st.size > 0) { clearInterval(timer); resolve({ file: full, size: st.size }); return; }
+        sizes.set(full, st.size);
       }
-      sizes.set(full, st.size);
-    }
-  }, 2000);
-  return dir;
+    }, 2000);
+  });
+  return { promise, cancel: () => { clearInterval(timer); rejectFn(new Error('Cancelled')); } };
+}
+
+// Watches the Downloads folder after the user starts a Nexus manual download, so the file can be installed in one click.
+let manualWatch = null;
+handle('downloads:watch', (modId, name) => {
+  if (manualWatch) manualWatch.cancel();
+  manualWatch = watchDownloads();
+  manualWatch.promise.then(({ file, size }) => send('download:found', { file, modId, name, size })).catch(() => {});
+  return app.getPath('downloads');
 });
-handle('downloads:stop', () => { clearInterval(watchTimer); return true; });
+handle('downloads:stop', () => { if (manualWatch) manualWatch.cancel(); manualWatch = null; return true; });
 
 // ---------- Nexus key ----------
 handle('nexus:setKey', async key => {
@@ -484,6 +494,21 @@ function nexusIdsFor(c, pluginNames) {
   return ids;
 }
 
+/** Every installed Nexus mod (Vortex, this app, or detected by its files), keyed by Nexus id. */
+function installedMods(c) {
+  const map = new Map();
+  for (const v of game.vortexMods(c.paths)) {
+    if (v.nexusId) map.set(v.nexusId, { nexusId: v.nexusId, version: v.version, name: v.name, fileHint: v.name, manager: 'Vortex' });
+  }
+  for (const r of Object.values(c.installer.registry())) {
+    if (r.nexusId && !map.has(r.nexusId)) map.set(r.nexusId, { nexusId: r.nexusId, version: r.version, name: r.name, fileHint: String(r.fileName || '').replace(ARCHIVE_EXT, ''), manager: 'STR Companion' });
+  }
+  for (const m of mods.modList(c.paths, c.installer.registry(), [])) {
+    if (m.id && m.installed && !map.has(m.id)) map.set(m.id, { nexusId: m.id, version: m.installedVersion || null, name: m.name, fileHint: '', manager: m.manager || 'Manual' });
+  }
+  return map;
+}
+
 function mySetup(c, snap = health.snapshot(c.paths)) {
   const pluginNames = snap.loadOrder.map(p => p.name);
   return {
@@ -495,6 +520,7 @@ function mySetup(c, snap = health.snapshot(c.paths)) {
     plugins: pluginNames,
     sksePlugins: snap.sksePlugins,
     nexusIds: nexusIdsFor(c, pluginNames),
+    mods: [...installedMods(c).values()],
   };
 }
 
@@ -575,6 +601,261 @@ handle('share:invite', publicIp => {
   ].join('\n');
 });
 
+// ---------- Nexus "Mod Manager Download" links (nxm://) ----------
+// Free Nexus accounts can't download through the API, but every "Mod Manager Download" click hands the
+// registered mod manager an nxm:// link with a one-time key. Registering for those links is what lets
+// free accounts install with one click per mod.
+
+const LINUX_DESKTOP = 'str-companion-nxm.desktop';
+
+/** How this copy of the app is started, for the OS to launch it with an nxm:// link. */
+function launchCommand() {
+  if (process.env.PORTABLE_EXECUTABLE_FILE) return { exe: process.env.PORTABLE_EXECUTABLE_FILE, args: [] }; // Windows portable exe
+  if (process.env.APPIMAGE) return { exe: process.env.APPIMAGE, args: [] };
+  if (app.isPackaged) return { exe: process.execPath, args: [] };
+  return { exe: process.execPath, args: [path.resolve(app.getAppPath())] }; // npm start (development)
+}
+
+/** Whether nxm:// links come to this app, and which other program has them otherwise (e.g. Vortex). */
+async function nxmStatus() {
+  if (process.platform === 'win32') {
+    const { exe, args } = launchCommand();
+    const registered = app.isDefaultProtocolClient('nxm', exe, args);
+    let owner = null;
+    if (!registered) {
+      const r = await util.run('reg', ['query', 'HKCR\\nxm\\shell\\open\\command', '/ve']);
+      const m = r.stdout.match(/REG_SZ\s+(.+)/);
+      if (m) owner = /vortex/i.test(m[1]) ? 'Vortex' : /modorganizer|nxmhandler/i.test(m[1]) ? 'Mod Organizer 2' : 'another program';
+    }
+    return { registered, owner };
+  }
+  const r = await util.run('xdg-mime', ['query', 'default', 'x-scheme-handler/nxm']);
+  const current = r.stdout.trim();
+  return { registered: current === LINUX_DESKTOP, owner: current && current !== LINUX_DESKTOP ? current.replace(/\.desktop$/, '') : null };
+}
+
+async function setNxmHandler(on) {
+  const { exe, args } = launchCommand();
+  if (process.platform === 'win32') {
+    const ok = on ? app.setAsDefaultProtocolClient('nxm', exe, args) : app.removeAsDefaultProtocolClient('nxm', exe, args);
+    if (!ok) throw new Error('Windows refused to change the nxm:// link handler.');
+    return nxmStatus();
+  }
+  const dir = path.join(os.homedir(), '.local', 'share', 'applications');
+  const file = path.join(dir, LINUX_DESKTOP);
+  if (on) {
+    const quote = s => `"${String(s).replace(/(["\\`$])/g, '\\$1')}"`;
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(file, [
+      '[Desktop Entry]', 'Type=Application', 'Name=STR Companion (Nexus links)', 'NoDisplay=true',
+      `Exec=${[exe, ...args].map(quote).join(' ')} %u`, 'MimeType=x-scheme-handler/nxm;', '',
+    ].join('\n'));
+    const r = await util.run('xdg-mime', ['default', LINUX_DESKTOP, 'x-scheme-handler/nxm']);
+    if (!r.ok) throw new Error('xdg-mime is needed to register for Nexus links (install xdg-utils).');
+  } else if (util.exists(file)) {
+    fs.rmSync(file, { force: true });
+  }
+  return nxmStatus();
+}
+
+handle('nxm:status', () => nxmStatus());
+handle('nxm:set', on => setNxmHandler(!!on));
+
+// Links the setup wizard is waiting for, by Nexus mod id.
+const nxmWaiters = new Map();
+let pendingNxm = [];
+
+function handleNxmUrl(url) {
+  const link = setup.parseNxm(url);
+  if (!link || link.game !== GAME) return;
+  const waiter = nxmWaiters.get(link.modId);
+  if (waiter) { nxmWaiters.delete(link.modId); waiter.resolve(link); return; }
+  // Not something the wizard asked for: any website can open nxm:// links, so the user confirms first.
+  if (win && !win.isDestroyed() && win.webContents.getURL()) send('nxm:incoming', { url, modId: link.modId, fileId: link.fileId });
+  else pendingNxm.push(url);
+}
+
+function nxmFromArgv(argv) {
+  return argv.find(a => /^nxm:\/\//i.test(a)) || null;
+}
+
+async function downloadAndInstall(c, modId, fileId, nxm, meta, onProgress) {
+  const links = await c.nexus.downloadLinks(modId, fileId, nxm);
+  const link = links && links[0] && links[0].URI;
+  if (!link || !/^https:/.test(link)) throw new Error('Nexus did not return a download link.');
+  const fileName = path.basename(decodeURIComponent(new URL(link).pathname)) || `${modId}-${fileId}.7z`;
+  const dest = path.join(appDataDir(), 'downloads', fileName);
+  await download(link, dest, onProgress);
+  try {
+    return await c.installer.installArchive(dest, meta);
+  } finally {
+    fs.rm(dest, { force: true }, () => {});
+  }
+}
+
+// An nxm link the user confirmed (clicked "Mod Manager Download" outside the wizard).
+handle('nxm:install', async url => {
+  const c = ctx();
+  if (!c.nexus.configured) throw new Error('Add your Nexus API key in Settings first.');
+  const link = setup.parseNxm(url);
+  if (!link || link.game !== GAME) throw new Error('Not a Skyrim Special Edition link.');
+  const [info, files] = await Promise.all([c.nexus.mod(link.modId), c.nexus.files(link.modId)]);
+  const file = (files.files || []).find(f => f.file_id === link.fileId);
+  return downloadAndInstall(c, link.modId, link.fileId, link, { name: info.name, nexusId: link.modId, version: (file && file.version) || info.version }, p => send('progress', { id: link.modId, p }));
+});
+
+// ---------- Quick Setup: set this PC up from a host's code ----------
+
+function setupLocalState(c) {
+  const snap = health.snapshot(c.paths);
+  const mine = mySetup(c, snap);
+  return {
+    snap,
+    local: {
+      gameVersion: snap.gameVersion,
+      mine,
+      onDisk: [...snap.loadOrder.map(p => p.name), ...snap.inactive],
+      implicit: snap.loadOrder.filter(p => p.source !== 'plugins.txt').map(p => p.name),
+      installed: installedMods(c),
+      ccExtra: snap.cc.removable.map(i => i.plugin),
+    },
+  };
+}
+
+handle('setup:plan', async code => {
+  const c = ctx();
+  const text = String(code || c.s.setupCode || '').trim();
+  if (!text) return { plan: null, hasNexusKey: c.nexus.configured };
+  const host = share.parseCode(text);
+  if (code) updateSettings({ setupCode: text });
+  const { local } = setupLocalState(c);
+  let premium = null;
+  if (c.nexus.configured) { try { premium = !!(await c.nexus.validate()).is_premium; } catch { premium = null; } }
+  return {
+    code: text,
+    host: { playerName: host.playerName, gameVersion: host.gameVersion, strVersion: host.strVersion, plugins: host.plugins.length, mods: host.mods.length },
+    plan: setup.buildPlan(host, local),
+    hasNexusKey: c.nexus.configured,
+    premium,
+    nxm: await nxmStatus(),
+    running: !!setupRun,
+  };
+});
+
+let setupRun = null;
+
+handle('setup:cancel', () => {
+  if (setupRun) {
+    setupRun.cancelled = true;
+    for (const w of nxmWaiters.values()) w.reject(new Error('Cancelled'));
+    nxmWaiters.clear();
+    if (setupRun.watch) setupRun.watch.cancel();
+  }
+  return true;
+});
+
+/**
+ * Installs every missing mod from the host's code (exact versions), then matches Anniversary content,
+ * load order and the co-op game preset. Progress is streamed to the window as 'setup:progress'.
+ */
+handle('setup:run', async (opts = {}) => {
+  if (setupRun) throw new Error('Setup is already running.');
+  const c = ctx();
+  const code = c.s.setupCode;
+  if (!code) throw new Error('Paste the host\'s setup code first.');
+  if (!c.nexus.configured) throw new Error('Add your Nexus API key first.');
+  const st = await launch.status();
+  if (st.game || st.client) throw new Error('Close Skyrim first.');
+  const host = share.parseCode(code);
+  const premium = !!(await c.nexus.validate()).is_premium;
+  const nxmOn = (await nxmStatus()).registered;
+  const run = setupRun = { cancelled: false, watch: null };
+  const progress = (stepId, state, extra = {}) => send('setup:progress', { stepId, state, ...extra });
+  const summary = { installed: [], failed: [], skipped: [] };
+
+  try {
+    const { local } = setupLocalState(c);
+    const plan = setup.buildPlan(host, local);
+    for (const step of plan.steps.filter(s => s.kind === 'mod' && (s.status === 'needed' || s.status === 'update'))) {
+      if (run.cancelled) break;
+      const m = step.mod;
+      try {
+        progress(step.id, 'working', { text: 'Finding the right file on Nexus…' });
+        const files = await c.nexus.files(m.nexusId);
+        const pick = setup.pickFile(files, m);
+        if (!pick) throw new Error('No downloadable files on Nexus.');
+        const meta = { name: m.name || pick.file.name, nexusId: m.nexusId, version: pick.file.version || m.version };
+        const versionNote = pick.exactVersion ? '' : ` (the host's ${m.version} isn't on Nexus anymore — using ${pick.file.version || 'the newest'})`;
+        let result;
+        if (premium) {
+          progress(step.id, 'working', { text: `Downloading ${pick.file.file_name}${versionNote}` });
+          result = await downloadAndInstall(c, m.nexusId, pick.file.file_id, null, meta, p => progress(step.id, 'working', { text: `Downloading ${pick.file.file_name}`, p }));
+        } else if (nxmOn) {
+          // Free account: open the file's download page; the user clicks "Slow download" and Nexus sends us the link.
+          let timeout;
+          const waiting = new Promise((resolve, reject) => {
+            nxmWaiters.set(m.nexusId, { resolve, reject });
+            timeout = setTimeout(() => { nxmWaiters.delete(m.nexusId); reject(new Error('Timed out waiting for the Nexus download')); }, 15 * 60 * 1000);
+          });
+          await shell.openExternal(fileDownloadUrl(m.nexusId, pick.file.file_id));
+          progress(step.id, 'waiting', { text: `Click "Slow download" on the Nexus page that just opened${versionNote}`, url: fileDownloadUrl(m.nexusId, pick.file.file_id) });
+          const link = await waiting.finally(() => clearTimeout(timeout));
+          progress(step.id, 'working', { text: 'Downloading…' });
+          result = await downloadAndInstall(c, m.nexusId, link.fileId, link, meta, p => progress(step.id, 'working', { text: 'Downloading…', p }));
+        } else {
+          // Not registered for Nexus links: the user downloads manually and we pick the file up from Downloads.
+          run.watch = watchDownloads();
+          await shell.openExternal(modUrl(m.nexusId, 'files'));
+          progress(step.id, 'waiting', { text: `Click "Manual download" on "${pick.file.name}"${pick.file.version ? ` (${pick.file.version})` : ''}${versionNote}`, url: modUrl(m.nexusId, 'files') });
+          const { file } = await run.watch.promise;
+          run.watch = null;
+          progress(step.id, 'working', { text: 'Installing…' });
+          result = await c.installer.installArchive(file, meta);
+        }
+        if (!result.ok) throw new Error(result.message);
+        summary.installed.push(meta.name);
+        progress(step.id, 'done', { text: result.choices ? `Installed (installer options: ${result.choices.map(x => x.option).join(', ')})` : 'Installed', choices: result.choices });
+      } catch (e) {
+        if (run.cancelled) break;
+        summary.failed.push({ name: m.name, error: e.message });
+        progress(step.id, 'failed', { text: e.message });
+      }
+    }
+
+    if (!run.cancelled && opts.cleanup !== false) {
+      const { local: now } = setupLocalState(c);
+      const extra = setup.buildPlan(host, now).steps.find(s => s.id === 'cleanup');
+      if (extra && extra.status === 'needed') {
+        progress('cleanup', 'working', { text: 'Moving Anniversary add-ons to backup…' });
+        const r = backupCreationClub(c, extra.plugins);
+        progress('cleanup', 'done', { text: `Moved ${r.moved} files to backup` });
+      }
+    }
+    if (!run.cancelled && opts.loadOrder !== false) {
+      progress('loadorder', 'working', { text: 'Matching the load order…' });
+      const { local: now } = setupLocalState(c);
+      const lp = share.matchPlan(now.mine, host, { onDisk: now.onDisk, implicit: now.implicit });
+      c.backups.snapshotConfig(util.resolveCI(c.paths.localAppDir, 'Plugins.txt'));
+      plugins.applyLoadOrder(c.paths.gameDir, c.paths.localAppDir, lp.order);
+      progress('loadorder', 'done', { text: lp.missing.length ? `Matched — ${lp.missing.length} plugin(s) still missing` : 'Matched' });
+    }
+    if (!run.cancelled && opts.preset && configs.configFiles(c.paths).find(f => f.id === 'prefs' && f.exists)) {
+      const p = configs.presets('prefs', appDataDir()).find(x => x.name === 'Co-op Friendly');
+      if (p) configs.save(c.paths, 'prefs', configs.presetToChanges(p.values), c.backups);
+    }
+  } finally {
+    setupRun = null;
+    for (const w of nxmWaiters.values()) w.reject(new Error('Cancelled'));
+    nxmWaiters.clear();
+  }
+
+  const { local: after } = setupLocalState(c);
+  const final = setup.buildPlan(host, after);
+  const inSync = share.compare(after.mine, host).filter(d => d.level === 'error').length === 0;
+  send('setup:progress', { stepId: null, state: 'finished', summary, inSync, remaining: final.remaining });
+  return { summary, inSync, cancelled: run.cancelled };
+});
+
 // ---------- misc ----------
 handle('shell:openGameDir', () => shell.openPath(ctx().paths.gameDir));
 handle('shell:external', url => {
@@ -604,6 +885,13 @@ function createWindow() {
   });
   win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   if (process.env.STRC_SHOTS) captureAllPages(process.env.STRC_SHOTS);
+  // Started by a Nexus "Mod Manager Download" click: handle that link once the page is ready.
+  win.webContents.once('did-finish-load', () => {
+    const first = nxmFromArgv(process.argv);
+    const queued = [...(first ? [first] : []), ...pendingNxm];
+    pendingNxm = [];
+    for (const u of queued) handleNxmUrl(u);
+  });
   win.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https:/.test(url)) shell.openExternal(url);
     return { action: 'deny' };
@@ -612,7 +900,7 @@ function createWindow() {
 
 /** Developer aid: STRC_SHOTS=<dir> saves a screenshot of every page, then quits. */
 function captureAllPages(dir) {
-  const pages = ['dashboard', 'play', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'settings'];
+  const pages = ['dashboard', 'setup', 'play', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'settings'];
   const wait = ms => new Promise(r => setTimeout(r, ms));
   win.webContents.once('did-finish-load', async () => {
     fs.mkdirSync(dir, { recursive: true });
@@ -623,6 +911,8 @@ function captureAllPages(dir) {
       'logs:crashes': `document.querySelector('#logTabs [data-tab="crashes"]').click()`,
       // STRC_COMPARE_CODE lets a test compare against a different friend; otherwise my own code is used.
       'friends:compare': `document.querySelector('#theirCode').value = ${JSON.stringify(process.env.STRC_COMPARE_CODE || '')} || document.querySelector('.copyable code').textContent; document.querySelector('#compare').click()`,
+      // Quick Setup with a code (the compare code, or my own) so the plan renders.
+      'setup:plan': `(async () => { const own = ${JSON.stringify(process.env.STRC_COMPARE_CODE || '')} || (await api.call('share:mine')).code; document.querySelector('#setupCode').value = own; document.querySelector('#check').click(); })()`,
     };
     const steps = [...pages, ...Object.keys(extra)];
     for (const step of steps) {
@@ -652,7 +942,10 @@ if (process.env.STRC_SHOTS) app.setPath('userData', path.join(os.tmpdir(), `strc
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_e, argv) => {
+    // Nexus "Mod Manager Download" clicks arrive here as a second launch with an nxm:// argument.
+    const link = nxmFromArgv(argv);
+    if (link) handleNxmUrl(link);
     if (!win) return;
     if (win.isMinimized()) win.restore();
     win.focus();

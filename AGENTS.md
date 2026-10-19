@@ -15,7 +15,7 @@ node test/fixtures.js <dir>   # create a fake Proton-style install, prints its g
 # Headless UI check: screenshots every page into <dir> plus report.json, then quits.
 # Uses a throwaway profile, so it works even while the real app is open.
 STRC_SHOTS=<dir> npm start
-STRC_COMPARE_CODE=<STR2-…> STRC_SHOTS=<dir> npm start   # the Friends compare step uses this code instead of your own
+STRC_COMPARE_CODE=<STR2-…> STRC_SHOTS=<dir> npm start   # the Friends compare and Quick Setup steps use this code instead of your own
 STRC_GAME_DIR=<fake game> STRC_SHOTS=<dir> npm start        # against a fixture instead of the real game
 xvfb-run -a npx electron . --no-sandbox                     # (Linux CI) with the two env vars above
 ```
@@ -42,6 +42,8 @@ src/core/       Pure Node modules that touch the game. No Electron imports. Unit
   cleanup.js    Creation Club report, plugin report, known-incompatible list
   backup.js     BackupStore: move-to-backup batches + manifest, restore, delete, save snapshots (async, auto-pruned), config snapshots
   installer.js  archive extraction (7-Zip), layout detection (Data vs game root vs FOMOD), registry
+  fomod.js      runs FOMOD installers (ModuleConfig.xml, UTF-8/16) non-interactively with recommended options
+  setup.js      Quick Setup: plan from a host's code, exact-version Nexus file picking, nxm:// link parsing
   configs.js    config file registry, load (with metadata), save, presets
   health.js     snapshot() gathers state; checks() turns it into the dashboard list with fixes
   mods.js       catalog + Vortex + registry merge, Nexus update checks
@@ -71,9 +73,10 @@ The renderer talks to the main process only through `api.call(channel, ...args)`
 5. **Secrets:** the Nexus API key is stored only via `safeStorage` and only sent to `api.nexusmods.com`. Never return it to the renderer. `settings:set` returns only whitelisted fields.
 6. **External links:** `shell:external` uses an allowlist regex. Keep it tight.
 7. **Escape everything** rendered with `innerHTML` through `esc()`. Mod names, log lines, INI values and friends' setup codes are untrusted.
-8. **Contain paths.** Any relative path from the renderer, a manifest or an archive goes through `util.isInside(gameDir, …)` before files are moved or written.
-9. **Don't block the main process** with big file copies; use `fs.promises` (snapshots, installs). A blocked main process freezes the window.
-10. **Dialogs:** use `confirmBox()` / `modal(html, onMount, onDismiss)`; dismissal (Esc, backdrop, Cancel) must resolve the caller.
+8. **nxm:// links can come from any website.** Only install from one without asking when the Quick Setup run is waiting for that exact mod id (`nxmWaiters`); otherwise the renderer must confirm (`nxm:incoming`).
+9. **Contain paths.** Any relative path from the renderer, a manifest or an archive goes through `util.isInside(gameDir, …)` before files are moved or written.
+10. **Don't block the main process** with big file copies; use `fs.promises` (snapshots, installs). A blocked main process freezes the window.
+11. **Dialogs:** use `confirmBox()` / `modal(html, onMount, onDismiss)`; dismissal (Esc, backdrop, Cancel) must resolve the caller.
 
 ## Domain facts the code relies on
 
@@ -85,7 +88,8 @@ The renderer talks to the main process only through `api.call(channel, ...args)`
 - `STServerOut.log` keeps the last session's players after the server exits, so only show players while the server process runs.
 - `tp_client.log` spans several launches. Only the part after the last "Installing SKSE … startup hooks" line counts. `BehaviorVar` warnings are expected noise.
 - Steam's `appmanifest_489830.acf` field `AutoUpdateBehavior` (1 = only update on launch) can only be edited while Steam is closed.
-- Free Nexus accounts cannot get download links from the API. The app opens the page and watches the Downloads folder instead.
+- Free Nexus accounts can't get download links from the API on their own. With the app registered for `nxm://` links (Quick Setup toggle; HKCU on Windows, an xdg `.desktop` file on Linux), a "Mod Manager Download" click delivers a one-time `key`/`expires` that `Nexus.downloadLinks(mod, file, nxm)` accepts. Without the handler, the app opens the page and watches the Downloads folder.
+- Setup codes (STR2) carry `m`: every installed Nexus mod with its version and archive-name hint, so `setup.pickFile` can fetch the host's exact file (old versions included).
 
 ## Editing data files
 

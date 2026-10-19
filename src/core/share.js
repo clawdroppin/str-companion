@@ -17,6 +17,9 @@ function makeCode(snapshot) {
     p: snapshot.plugins,
     k: snapshot.sksePlugins,
     x: snapshot.nexusIds || {},
+    // Every Nexus mod installed, including ones without plugins (SKSE, Address Library, DLL fixes),
+    // with the exact version and archive name so a friend's app can fetch the same file.
+    m: (snapshot.mods || []).map(m => ({ i: m.nexusId, v: m.version || null, n: m.name || '', f: m.fileHint || '' })),
   };
   return PREFIX + zlib.deflateRawSync(Buffer.from(JSON.stringify(payload))).toString('base64url');
 }
@@ -34,6 +37,8 @@ function parseCode(code) {
   return {
     playerName: p.n, gameVersion: p.g, strVersion: p.t, skseVersion: p.s,
     addressLibrary: !!p.a, plugins: p.p || [], sksePlugins: p.k || [], nexusIds: p.x || {},
+    mods: (p.m || []).filter(m => Number.isInteger(m.i) && m.i > 0)
+      .map(m => ({ nexusId: m.i, version: m.v || null, name: String(m.n || ''), fileHint: String(m.f || '') })),
   };
 }
 

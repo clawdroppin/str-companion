@@ -2,7 +2,8 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
-const { exists, readJson, writeJson, run, walkFiles, listDir, which, isInside } = require('./util');
+const { exists, readJson, writeJson, run, walkFiles, listDir, which, isInside, resolveCIStrict } = require('./util');
+const fomod = require('./fomod');
 const plugins = require('./plugins');
 
 const DATA_DIRS = new Set(['meshes', 'textures', 'scripts', 'interface', 'sound', 'music', 'seq', 'skse', 'strings',
@@ -65,8 +66,8 @@ function analyze(dir) {
   }
   const entries = listDir(root);
   const names = entries.map(e => e.name.toLowerCase());
-  if (names.includes('fomod') && exists(path.join(root, entries[names.indexOf('fomod')].name, 'ModuleConfig.xml'))) {
-    return { root, target: null, fomod: true };
+  if (names.includes('fomod') && exists(resolveCIStrict(root, 'fomod', 'ModuleConfig.xml'))) {
+    return { root, target: 'data', fomod: true };
   }
   if (names.includes('data')) return { root, target: 'game', fomod: false };
   const hasDataStuff = entries.some(e => (e.isDirectory() && DATA_DIRS.has(e.name.toLowerCase())) || (e.isFile() && DATA_EXT.test(e.name)));
@@ -97,19 +98,32 @@ class Installer {
     try {
       await extract(archive, tmp);
       const a = analyze(tmp);
-      if (a.fomod) {
-        return { ok: false, reason: 'fomod', message: 'This mod has an installer with options. Install it with Vortex ("Mod Manager Download" on Nexus) so you can pick them.' };
-      }
       if (!a.target) {
         return { ok: false, reason: 'unknown-layout', message: "Couldn't tell where this mod's files go. Install it with Vortex instead." };
       }
-      const prefix = a.target === 'data' ? 'Data' : '';
-      const files = walkFiles(a.root)
-        // Skip installer metadata, and SKSE's bundled source code which the game never uses.
-        .filter(f => !/^fomod[\\/]/i.test(f) && !(a.target === 'game' && /^src[\\/]/i.test(f)))
-        .map(f => ({ from: path.join(a.root, f), rel: path.join(prefix, f) }))
-        // An archive with "../" entries must not write outside the game folder.
-        .filter(f => isInside(this.paths.gameDir, path.join(this.paths.gameDir, f.rel)));
+      let files;
+      let choices = null;
+      if (a.fomod) {
+        // Run the mod's own installer with its recommended options.
+        let r;
+        try {
+          const lo = plugins.effectiveLoadOrder(this.paths.gameDir, this.paths.localAppDir);
+          r = fomod.resolve(a.root, { active: lo.order.map(p => p.name), onDisk: [...lo.order.map(p => p.name), ...lo.inactive] });
+        } catch (e) {
+          return { ok: false, reason: 'fomod', message: `This mod's installer couldn't be read (${e.message}). Install it with Vortex instead.` };
+        }
+        if (!r.files.length) return { ok: false, reason: 'fomod', message: "This mod's installer didn't select any files with its default options. Install it with Vortex so you can pick them." };
+        files = r.files.map(f => ({ from: f.from, rel: path.join('Data', f.to) }));
+        choices = r.choices;
+      } else {
+        const prefix = a.target === 'data' ? 'Data' : '';
+        files = walkFiles(a.root)
+          // Skip installer metadata, and SKSE's bundled source code which the game never uses.
+          .filter(f => !/^fomod[\\/]/i.test(f) && !(a.target === 'game' && /^src[\\/]/i.test(f)))
+          .map(f => ({ from: path.join(a.root, f), rel: path.join(prefix, f) }));
+      }
+      // An archive with "../" entries must not write outside the game folder.
+      files = files.filter(f => isInside(this.paths.gameDir, path.join(this.paths.gameDir, f.rel)));
 
       const key = meta.nexusId ? `nexus-${meta.nexusId}` : `local-${path.basename(archive).replace(ARCHIVE_EXT, '')}`;
       const reg = this.registry();
@@ -148,7 +162,7 @@ class Installer {
         replacedBackups,
       };
       writeJson(this.registryFile, reg);
-      return { ok: true, key, files: files.length, plugins: newPlugins, replaced: overwritten.length, target: a.target };
+      return { ok: true, key, files: files.length, plugins: newPlugins, replaced: overwritten.length, target: a.target, choices };
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

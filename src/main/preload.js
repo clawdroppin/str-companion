@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('api', {
     return r.data;
   },
   on(channel, fn) {
-    const allowed = ['progress', 'download:found'];
+    const allowed = ['progress', 'download:found', 'setup:progress', 'nxm:incoming'];
     if (!allowed.includes(channel)) return;
     ipcRenderer.on(channel, (_e, payload) => fn(payload));
   },

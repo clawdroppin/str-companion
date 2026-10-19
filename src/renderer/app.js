@@ -105,7 +105,7 @@ async function renderNow() {
   clearTimers();
   updateFoot();
   if (!state.valid) return renderWelcome();
-  const pages = { dashboard, play, mods, cleanup, config, friends, session, backups, logs, settings };
+  const pages = { dashboard, setup: setupPage, play, mods, cleanup, config, friends, session, backups, logs, settings };
   main().innerHTML = `<div class="empty"><span class="spinner"></span> Loading…</div>`;
   try {
     await pages[state.page]();
@@ -147,6 +147,7 @@ async function dashboard() {
       : ['good', 'Ready to play', 'Everything checks out'];
   main().innerHTML = head('Dashboard', 'A health check of your Skyrim Together setup. Anything with a button can be fixed in one click — every change is backed up.',
     `<button class="btn" id="rescan">↻ Re-scan</button><button class="btn primary" id="toPlay">▶ Play</button>`) + `
+    ${!s.str.installed ? '<div class="callout" style="margin-bottom:14px"><b>New here?</b> Paste your host&#39;s setup code in <a href="#" id="toSetup">Quick Setup</a> and the app installs and matches everything for you.</div>' : ''}
     <div class="grid stats">
       <div class="stat ${verdict[0]}"><div class="k">Status</div><div class="v">${verdict[1]}</div><div class="d">${verdict[2]}</div></div>
       <div class="stat"><div class="k">Skyrim</div><div class="v">${esc(s.gameVersion || '?')}</div><div class="d">${s.autoUpdate ? esc(s.autoUpdate.label) : ''}</div></div>
@@ -162,6 +163,7 @@ async function dashboard() {
     </div>`;
   $('#rescan').addEventListener('click', () => render());
   $('#toPlay').addEventListener('click', () => go('play'));
+  if ($('#toSetup')) $('#toSetup').addEventListener('click', e => { e.preventDefault(); go('setup'); });
   main().querySelectorAll('[data-fix]').forEach(b => b.addEventListener('click', async () => {
     const fix = checks[Number(b.dataset.fix)].fix;
     if (fix.action === 'goto') {
@@ -183,6 +185,135 @@ async function dashboard() {
     } catch { busy(b, false); }
   }));
 }
+
+// ---------- Quick Setup ----------
+// Live progress from the main process, kept here so it survives page switches while setup runs.
+const setupProgress = {};
+let setupRunning = false;
+
+api.on('setup:progress', ev => {
+  if (ev.state === 'finished') {
+    setupRunning = false;
+    const s = ev.summary;
+    toast(ev.inSync ? '✓ Setup finished — you match the host' : `Setup finished: ${s.installed.length} installed${s.failed.length ? `, ${s.failed.length} failed` : ''}`, ev.inSync ? 'ok' : '');
+    if (state.page === 'setup') render();
+    return;
+  }
+  setupProgress[ev.stepId] = ev;
+  paintStep(ev.stepId);
+});
+
+const STEP_ICON = { done: '✓', needed: '●', update: '↑', vortex: 'V', blocked: '✕' };
+const STEP_LEVEL = { done: 'ok', needed: 'info', update: 'warn', vortex: 'warn', blocked: 'error' };
+
+function paintStep(id) {
+  const el = document.querySelector(`[data-step="${CSS.escape(String(id))}"] .live`);
+  const ev = setupProgress[id];
+  if (!el || !ev) return;
+  const icon = { working: '<span class="spinner"></span>', waiting: '⏳', done: '✓', failed: '✕' }[ev.state] || '';
+  el.innerHTML = `<div class="sub" style="color:${ev.state === 'failed' ? 'var(--err)' : ev.state === 'done' ? 'var(--ok)' : 'var(--gold-2)'}">${icon} ${esc(ev.text || '')}
+    ${ev.state === 'waiting' && ev.url ? ' <a href="#" class="reopen">Open the page again</a>' : ''}</div>
+    ${typeof ev.p === 'number' ? `<div class="progress"><div style="width:${Math.round(ev.p * 100)}%"></div></div>` : ''}`;
+  const a = el.querySelector('.reopen');
+  if (a) a.addEventListener('click', e => { e.preventDefault(); call('shell:external', ev.url); });
+}
+
+async function setupPage() {
+  const code = state.prefillSetupCode || '';
+  state.prefillSetupCode = null;
+  let d;
+  // A bad code shows an error toast; fall back to the last good code so the page still works.
+  try { d = await call('setup:plan', code); } catch { d = await call('setup:plan', ''); }
+  setupRunning = setupRunning || d.running;
+  const p = d.plan;
+  const keyCard = !d.hasNexusKey ? `
+      <div class="sub">The app uses your <b>personal Nexus API key</b> to find the exact files your host has. It's free and takes a minute:</div>
+      <ol class="sub" style="margin:8px 0 10px 18px;padding:0">
+        <li>Click <b>Open my API key page</b> and log in to Nexus Mods (free account is fine).</li>
+        <li>Scroll to <b>Personal API Key</b>, copy it, and paste it here.</li>
+      </ol>
+      <div class="row"><button class="btn" id="getKey">Open my API key page</button>
+        <input type="password" id="apikey" placeholder="Paste your Nexus API key" style="flex:1;min-width:220px" autocomplete="off">
+        <button class="btn primary" id="saveKey">Save key</button></div>`
+    : d.premium ? '<div class="callout blue">✓ <b>Premium account</b> — every mod downloads and installs automatically.</div>'
+      : `<div class="sub">✓ Connected (free account). Nexus only lets Premium accounts download automatically, so free accounts click <b>"Slow download"</b> once per mod — the app does everything else.</div>
+        <label class="row" style="cursor:pointer;margin-top:10px"><span class="switch"><input type="checkbox" id="nxmToggle" ${d.nxm.registered ? 'checked' : ''}><span></span></span>
+          <span><b>Let STR Companion handle "Mod Manager Download" links</b><br><span class="sub">Each click on Nexus then installs the right file straight away.${d.nxm.owner ? ` Right now <b>${esc(d.nxm.owner)}</b> handles them — turning this on takes them over; ${esc(d.nxm.owner)} can take them back from its own settings.` : ''}</span></span></label>
+        ${!d.nxm.registered ? '<div class="sub" style="margin-top:6px">Off: you click <b>Manual download</b> instead, and the app picks the file up from your Downloads folder.</div>' : ''}`;
+
+  const stepsHtml = p ? p.steps.map(s => `
+      <div class="check ${STEP_LEVEL[s.status] || 'info'}" data-step="${esc(s.id)}">
+        <div class="dot">${STEP_ICON[s.status] || '•'}</div>
+        <div><div class="t">${esc(s.title)}</div><div class="d">${esc(s.detail)}</div><div class="live"></div></div>
+        <div>${s.kind === 'mod' && s.mod ? `<button class="btn small ghost" data-nexus="${Number(s.mod.nexusId)}">Nexus page</button>` : ''}</div>
+      </div>`).join('') : '';
+  const todo = p ? p.steps.filter(s => ['needed', 'update'].includes(s.status)) : [];
+  const vortexSteps = p ? p.steps.filter(s => s.status === 'vortex') : [];
+
+  main().innerHTML = head('Quick Setup', 'Paste your host\'s setup code and the app makes this PC match it: the same mods in the same versions, Anniversary content sorted, and the same load order.') + `
+    <div class="card">
+      <h2>1. Your host's setup code</h2>
+      <div class="sub">Ask your host to copy it from <b>Friends Sync</b> (or the Copy invite message).</div>
+      <textarea id="setupCode" rows="3" placeholder="STR2-…" style="margin-top:10px">${esc(d.code || '')}</textarea>
+      <div class="row" style="margin-top:10px"><button class="btn primary" id="check">${p ? 'Check again' : 'Check'}</button>
+        ${d.host ? `<span class="sub">Host: <b>${esc(d.host.playerName || 'unnamed')}</b> · Skyrim ${esc(d.host.gameVersion)} · Skyrim Together ${esc(d.host.strVersion || '?')} · ${d.host.mods} mods · ${d.host.plugins} plugins</span>` : ''}</div>
+    </div>
+    <div class="card"><h2>2. Your Nexus Mods account</h2>${keyCard}</div>
+    ${p ? `<div class="card">
+      <div class="card-head"><div><h2>3. Set up</h2><div class="sub">${todo.length ? `${todo.length} thing${todo.length > 1 ? 's' : ''} to do.` : 'Everything already matches the host.'} Files that get replaced are backed up first, and nothing is deleted.</div></div>
+        <div class="row">${setupRunning ? '<button class="btn danger" id="cancelSetup">Cancel</button>' : `<button class="btn primary big" id="runSetup" ${!d.hasNexusKey || !todo.length ? 'disabled' : ''}>Set up everything</button>`}</div></div>
+      <label class="row sub" style="cursor:pointer;margin-bottom:12px"><span class="switch"><input type="checkbox" id="presetToo" checked><span></span></span>Also apply the co-op game settings (borderless window, dialogue subtitles)</label>
+      ${vortexSteps.length ? `<div class="callout" style="margin-bottom:12px">${vortexSteps.length} mod${vortexSteps.length > 1 ? 's are' : ' is'} managed by Vortex at a different version — update ${vortexSteps.length > 1 ? 'them' : 'it'} in Vortex so the app doesn't install a second copy.</div>` : ''}
+      <div class="checks">${stepsHtml}</div>
+    </div>` : ''}`;
+
+  Object.keys(setupProgress).forEach(paintStep);
+  $('#check').addEventListener('click', async e => {
+    busy(e.currentTarget, true, 'Checking…');
+    try { state.prefillSetupCode = $('#setupCode').value.trim(); render(); } catch { busy(e.currentTarget, false); }
+  });
+  if ($('#getKey')) $('#getKey').addEventListener('click', () => call('nexus:openKeyPage'));
+  if ($('#saveKey')) $('#saveKey').addEventListener('click', async e => {
+    busy(e.currentTarget, true, 'Checking…');
+    try {
+      const r = await call('nexus:setKey', $('#apikey').value);
+      toast(`Connected as ${r.name}${r.premium ? ' (Premium)' : ''}`, 'ok');
+      render();
+    } catch { busy(e.currentTarget, false); }
+  });
+  if ($('#nxmToggle')) $('#nxmToggle').addEventListener('change', async e => {
+    try {
+      const r = await call('nxm:set', e.target.checked);
+      toast(r.registered ? 'Nexus "Mod Manager Download" links now open STR Companion' : 'STR Companion no longer handles Nexus links', 'ok');
+    } catch { /* toast shown */ }
+    render();
+  });
+  main().querySelectorAll('[data-nexus]').forEach(b => b.addEventListener('click', () => call('mods:openNexus', Number(b.dataset.nexus), 'files')));
+  if ($('#cancelSetup')) $('#cancelSetup').addEventListener('click', async () => { await call('setup:cancel'); toast('Cancelling after the current step…'); });
+  if ($('#runSetup')) $('#runSetup').addEventListener('click', async () => {
+    const mods = todo.filter(s => s.kind === 'mod').length;
+    const how = d.premium ? 'download and install automatically'
+      : d.nxm.registered ? 'open each Nexus page in your browser — click "Slow download" and the app installs it'
+        : 'open each Nexus page — click "Manual download" and the app installs it from your Downloads folder';
+    if (!await confirmBox('Set up everything?', `${mods ? `<b>${mods} mod${mods > 1 ? 's' : ''}</b> will ${how}. ` : ''}Then Anniversary content and the load order are matched to the host${$('#presetToo').checked ? ', and the co-op game settings are applied' : ''}.<br><br>Keep Skyrim closed until it's done.`, 'Start')) return;
+    for (const k of Object.keys(setupProgress)) delete setupProgress[k];
+    setupRunning = true;
+    const preset = $('#presetToo').checked;
+    render();
+    call('setup:run', { preset }).catch(() => { setupRunning = false; if (state.page === 'setup') render(); });
+  });
+}
+
+// A "Mod Manager Download" click the app didn't ask for: confirm before installing anything.
+api.on('nxm:incoming', async ({ url, modId, fileId }) => {
+  if (!await confirmBox('Install from Nexus?', `You clicked <b>Mod Manager Download</b> for Nexus mod <b>#${Number(modId)}</b> (file ${Number(fileId)}). Install it now?`, 'Install')) return;
+  const close = modal('<h2>Installing…</h2><div class="sub"><span class="spinner"></span> Downloading from Nexus and installing.</div>');
+  try {
+    const r = await api.call('nxm:install', url);
+    close();
+    showInstallResult(`Nexus mod #${Number(modId)}`, r);
+  } catch (e) { close(); toast(e.message, 'err'); }
+});
 
 // ---------- Play & Server ----------
 async function play() {
@@ -729,13 +860,15 @@ async function compareCode(code) {
       ${p.missing.length ? `<div class="sub" style="margin-top:10px"><b style="color:var(--warn)">You need to install ${p.missing.length} mod${p.missing.length > 1 ? 's' : ''} first:</b></div>
         <div class="players" style="margin-top:6px">${p.missing.map(m => `<div class="player"><span class="mono" style="flex:1">${esc(m.name)}</span>${m.nexusId ? `<button class="btn small" data-nexus="${Number(m.nexusId)}">Nexus page</button>` : '<span class="sub">ask them which mod this is</span>'}</div>`).join('')}</div>` : ''}
       ${p.extraImplicit.length ? `<div class="sub" style="margin-top:10px">You have Creation Club content they don't (<span class="mono">${p.extraImplicit.map(esc).join(', ')}</span>). It can't be switched off — move it to backup on the <a href="#" id="toCleanup">Cleanup</a> page.</div>` : ''}
-      ${p.changes ? `<div class="row" style="margin-top:12px"><button class="btn primary" id="applyMatch">Match their load order</button></div>` : ''}
+      <div class="row" style="margin-top:12px">${p.missing.length ? '<button class="btn primary" id="toQuickSetup">Install everything with Quick Setup</button>' : ''}${p.changes ? `<button class="btn ${p.missing.length ? '' : 'primary'}" id="applyMatch">Match their load order</button>` : ''}</div>
     </div>` : '';
   $('#result').innerHTML = (!r.diffs.length
     ? `<div class="callout blue">✓ <b>${who}</b> has exactly the same setup. You're good to go.</div>`
     : `<div class="sub" style="margin-bottom:8px"><b>${who}</b> — ${r.diffs.filter(d => d.level === 'error').length} must-fix, ${r.diffs.filter(d => d.level !== 'error').length} minor</div>` +
       r.diffs.map(d => `<div class="diff ${d.level}"><div class="lvl">${{ error: 'Fix', warn: 'Check', info: 'FYI' }[d.level]}</div><div>${esc(d.text)}</div></div>`).join('')) + planHtml;
   $('#result').querySelectorAll('[data-nexus]').forEach(b => b.addEventListener('click', () => call('mods:openNexus', Number(b.dataset.nexus), 'files')));
+  const qs = $('#toQuickSetup');
+  if (qs) qs.addEventListener('click', () => { state.prefillSetupCode = code; go('setup'); });
   const tc = $('#toCleanup');
   if (tc) tc.addEventListener('click', e => { e.preventDefault(); go('cleanup'); });
   const apply = $('#applyMatch');

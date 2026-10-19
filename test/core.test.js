@@ -211,7 +211,7 @@ test('new ini files get Windows line endings', () => {
 });
 
 test('setup codes round-trip and report differences', () => {
-  const mine = { playerName: 'A', gameVersion: '1.7.104', strVersion: '1.8.3', skseVersion: '2.3.1', addressLibrary: true, plugins: ['Skyrim.esm', 'USSEP.esp', 'X.esp'], sksePlugins: ['EngineFixes.dll'], nexusIds: { 'USSEP.esp': 266 } };
+  const mine = { playerName: 'A', gameVersion: '1.7.104', strVersion: '1.8.3', skseVersion: '2.3.1', addressLibrary: true, plugins: ['Skyrim.esm', 'USSEP.esp', 'X.esp'], sksePlugins: ['EngineFixes.dll'], nexusIds: { 'USSEP.esp': 266 }, mods: [{ nexusId: 266, version: '4.3.9c', name: 'Unofficial Skyrim Special Edition Patch', fileHint: '' }] };
   const code = share.makeCode(mine);
   assert.match(code, /^STR2-/);
   assert.throws(() => share.parseCode('STR2-garbage!!'), /isn't an STR Companion setup code/);
@@ -457,4 +457,158 @@ test('health flags switched-off STR plugins, game updates and plugin counts', ()
   assert.strictEqual(off.fix.action, 'activatePlugins');
   assert.ok(list.some(x => /updated from 1\.6\.640 to 1\.6\.1170/.test(x.title)));
   assert.ok(snap.counts.full > 0 && snap.counts.light > 0);
+});
+
+// ---------- Quick Setup ----------
+
+test('setup plan: foundation mods first, exact versions, unknown plugins, cleanup and load order', () => {
+  const setup = require('../src/core/setup');
+  const host = {
+    gameVersion: '1.7.104',
+    plugins: ['Skyrim.esm', 'SkyrimTogether.esp', 'SkyUI_SE.esp', 'Mystery.esp'],
+    nexusIds: { 'SkyrimTogether.esp': 69993, 'SkyUI_SE.esp': 12604 },
+    mods: [
+      { nexusId: 12604, version: '5.2SE', name: 'SkyUI', fileHint: 'SkyUI_5_2_SE' },
+      { nexusId: 32444, version: '13', name: 'Address Library All in One', fileHint: '' },
+      { nexusId: 69993, version: '1.8.3', name: 'Skyrim Together Reborn', fileHint: '' },
+      { nexusId: 30379, version: null, name: 'SKSE', fileHint: '' },
+    ],
+  };
+  const local = {
+    gameVersion: '1.6.1170',
+    mine: { plugins: ['Skyrim.esm', 'ccBGSSSE002-ExoticArrows.esl', 'SkyrimTogether.esp'] },
+    onDisk: ['Skyrim.esm', 'ccBGSSSE002-ExoticArrows.esl', 'SkyrimTogether.esp'],
+    implicit: ['Skyrim.esm', 'ccBGSSSE002-ExoticArrows.esl'],
+    installed: new Map([[69993, { version: '1.8.2', manager: 'STR Companion' }], [30379, { version: '2.3.1', manager: 'Manual' }]]),
+    ccExtra: ['ccBGSSSE002-ExoticArrows.esl'],
+  };
+  const { steps, remaining } = setup.buildPlan(host, local);
+  assert.deepStrictEqual(steps.map(s => s.id), ['game', 'mod-69993', 'mod-30379', 'mod-32444', 'mod-12604', 'unknown', 'cleanup', 'loadorder']);
+  const by = id => steps.find(s => s.id === id);
+  assert.strictEqual(by('game').status, 'blocked');
+  assert.strictEqual(by('mod-69993').status, 'update', 'STR 1.8.2 vs host 1.8.3');
+  assert.strictEqual(by('mod-30379').status, 'done', 'host version unknown counts as match');
+  assert.strictEqual(by('mod-32444').status, 'needed');
+  assert.match(by('unknown').detail, /Mystery\.esp/);
+  assert.deepStrictEqual(by('cleanup').plugins, ['ccBGSSSE002-ExoticArrows.esl']);
+  assert.strictEqual(by('loadorder').status, 'needed');
+  assert.strictEqual(remaining, 5);
+
+  local.installed.set(69993, { version: '1.8.2', manager: 'Vortex' });
+  assert.strictEqual(setup.buildPlan(host, local).steps.find(s => s.id === 'mod-69993').status, 'vortex');
+});
+
+test('pickFile prefers the host version, then the archive name, then main files', () => {
+  const { pickFile } = require('../src/core/setup');
+  const files = { files: [
+    { file_id: 1, name: 'Main', file_name: 'Thing-1-2-0-1700000300.7z', version: '2.0', category_name: 'MAIN', uploaded_timestamp: 300 },
+    { file_id: 2, name: 'Old', file_name: 'Thing-1-1-5-1700000100.7z', version: '1.5', category_name: 'OLD_VERSION', uploaded_timestamp: 100 },
+    { file_id: 3, name: 'GOG build', file_name: 'Thing GOG-1-1-5-1700000101.7z', version: '1.5', category_name: 'OLD_VERSION', uploaded_timestamp: 101 },
+    { file_id: 4, name: 'Gone', file_name: 'x.7z', version: '1.5', category_name: 'ARCHIVED' },
+  ] };
+  assert.deepStrictEqual(pickFile(files, { version: '1.5', fileHint: 'Thing' }), { file: files.files[1], exactVersion: true });
+  assert.strictEqual(pickFile(files, { version: '1.5', fileHint: 'Thing GOG' }).file.file_id, 3);
+  assert.deepStrictEqual(pickFile(files, { version: '9.9' }), { file: files.files[0], exactVersion: false });
+  assert.strictEqual(pickFile({ files: [] }, {}), null);
+  assert.strictEqual(pickFile(files, { version: '1.5', fileHint: 'Thing GOG-1-1-5-1700000101' }).file.file_id, 3, 'a full archive name works as the hint too');
+});
+
+test('parseNxm reads Nexus mod-manager links', () => {
+  const { parseNxm } = require('../src/core/setup');
+  assert.deepStrictEqual(parseNxm('nxm://skyrimspecialedition/mods/12604/files/35407?key=abc&expires=1700000000&user_id=42'),
+    { game: 'skyrimspecialedition', modId: 12604, fileId: 35407, key: 'abc', expires: '1700000000', userId: '42' });
+  assert.strictEqual(parseNxm('https://evil.example/x'), null);
+  assert.strictEqual(parseNxm('nxm://skyrimspecialedition/mods/abc/files/1'), null);
+});
+
+function writeFomodMod(dir) {
+  const files = {
+    'Core/Core.esp': pluginBytes(['Skyrim.esm']),
+    'Options/Big/textures/big.dds': 'big',
+    'Options/Small/textures/small.dds': 'small',
+    'Patches/USSEP Patch.esp': pluginBytes(['Skyrim.esm']),
+    'Patches/Fallback.esp': pluginBytes(['Skyrim.esm']),
+    'Extras/readme.txt': 'hi',
+  };
+  for (const [f, body] of Object.entries(files)) {
+    fs.mkdirSync(path.dirname(path.join(dir, f)), { recursive: true });
+    fs.writeFileSync(path.join(dir, f), body);
+  }
+  const xml = `<?xml version="1.0" encoding="UTF-16"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <moduleName>Fomod Test</moduleName>
+  <requiredInstallFiles><file source="Core\\Core.esp" destination="Core.esp"/></requiredInstallFiles>
+  <installSteps order="Explicit">
+    <installStep name="Textures">
+      <optionalFileGroups order="Explicit">
+        <group name="Resolution" type="SelectExactlyOne">
+          <plugins order="Explicit">
+            <plugin name="Small"><description/><files><folder source="options/small" destination=""/></files>
+              <typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+            <plugin name="Big"><description/><files><folder source="Options\\Big" destination=""/></files>
+              <conditionFlags><flag name="res">big</flag></conditionFlags>
+              <typeDescriptor><type name="Recommended"/></typeDescriptor></plugin>
+          </plugins>
+        </group>
+        <group name="Extras" type="SelectAny">
+          <plugins order="Explicit">
+            <plugin name="Readme"><description/><files><file source="Extras/readme.txt" destination="docs/"/></files>
+              <typeDescriptor><type name="Optional"/></typeDescriptor></plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+    <installStep name="Patches">
+      <visible><flagDependency flag="res" value="big"/></visible>
+      <optionalFileGroups order="Explicit">
+        <group name="Patch" type="SelectAny">
+          <plugins order="Explicit">
+            <plugin name="USSEP patch"><description/><files><file source="Patches/USSEP Patch.esp" destination="USSEP Patch.esp"/></files>
+              <typeDescriptor><dependencyType><defaultType name="Optional"/><patterns><pattern>
+                <dependencies operator="And"><fileDependency file="USSEP.esp" state="Active"/></dependencies><type name="Recommended"/>
+              </pattern></patterns></dependencyType></typeDescriptor></plugin>
+          </plugins>
+        </group>
+      </optionalFileGroups>
+    </installStep>
+  </installSteps>
+  <conditionalFileInstalls><patterns>
+    <pattern><dependencies operator="And"><flagDependency flag="res" value="small"/></dependencies>
+      <files><file source="Patches/Fallback.esp" destination="Fallback.esp"/></files></pattern>
+  </patterns></conditionalFileInstalls>
+</config>`;
+  fs.mkdirSync(path.join(dir, 'fomod'), { recursive: true });
+  // UTF-16 LE with a BOM, like many real installers.
+  fs.writeFileSync(path.join(dir, 'fomod', 'ModuleConfig.xml'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(xml, 'utf16le')]));
+}
+
+test('FOMOD installers run with their recommended options', () => {
+  const fomod = require('../src/core/fomod');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'strc-fomod-'));
+  writeFomodMod(dir);
+  const r = fomod.resolve(dir, { active: ['Skyrim.esm', 'USSEP.esp'], onDisk: ['Skyrim.esm', 'USSEP.esp'] });
+  const to = r.files.map(f => f.to.split(path.sep).join('/')).sort();
+  assert.deepStrictEqual(to, ['Core.esp', 'USSEP Patch.esp', 'textures/big.dds']);
+  assert.deepStrictEqual(r.choices.map(c => c.option), ['Big', 'USSEP patch']);
+  assert.strictEqual(r.moduleName, 'Fomod Test');
+  // Without USSEP active, the patch is only "Optional" and isn't picked.
+  const r2 = fomod.resolve(dir, { active: ['Skyrim.esm'], onDisk: ['Skyrim.esm'] });
+  assert.ok(!r2.files.some(f => /USSEP Patch/.test(f.to)));
+});
+
+test('installing a FOMOD archive puts the chosen files in Data', async () => {
+  const { root, paths } = fakeGame();
+  const src = path.join(root, 'fomodsrc', 'Fomod Test');
+  writeFomodMod(src);
+  const archive = path.join(root, 'Fomod Test-999-1-0.7z');
+  assert.ok((await run(sevenZip().exe, ['a', archive, src])).ok);
+  const inst = new Installer(paths, path.join(root, 'appdata'), new BackupStore(paths));
+  const res = await inst.installArchive(archive, { name: 'Fomod Test', nexusId: 999, version: '1.0' });
+  assert.strictEqual(res.ok, true, res.message);
+  assert.ok(fs.existsSync(path.join(paths.dataDir, 'Core.esp')));
+  assert.ok(fs.existsSync(path.join(paths.dataDir, 'textures', 'big.dds')));
+  assert.ok(fs.existsSync(path.join(paths.dataDir, 'USSEP Patch.esp')), 'USSEP.esp is active in the fixture');
+  assert.ok(!fs.existsSync(path.join(paths.dataDir, 'textures', 'small.dds')));
+  assert.ok(!fs.existsSync(path.join(paths.dataDir, 'fomod')));
+  assert.ok(res.choices.length >= 1);
 });

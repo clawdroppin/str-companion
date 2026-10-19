@@ -51,6 +51,7 @@ The app finds Skyrim through Steam. If it doesn't, point it at the folder that c
 | | |
 |---|---|
 | 🩺 **Dashboard** | Health check of your whole setup: game version, SKSE, Address Library, Skyrim Together, **missing master files** (the #1 cause of startup crashes), plugin limits, problem mods, Anniversary Edition content, and Steam auto-updates. It also warns when **Steam updated Skyrim** since your last session, flags **Skyrim Together's plugins being switched off**, and summarizes the **last crash**. Most problems have a **one-click fix**. |
+| ★ **Quick Setup** | For friends on a fresh install: paste the host's setup code and add a Nexus API key. The app installs **every mod at the host's exact version**, runs mod installers (FOMOD) with their recommended options, moves extra Anniversary content aside, matches the load order and applies the co-op game settings. **Premium** Nexus accounts are fully automatic. **Free** accounts click "Slow download" once per mod, because STR Companion handles Nexus's *Mod Manager Download* links. |
 | ▶️ **Play & Server** | Launch Skyrim Together (your saves are **snapshotted automatically first**), start, stop or restart your server, see who's connected live, and **copy a ready-made invite** (address, password and setup code) for your group chat. |
 | 🧩 **Mods** | A curated catalog (Required · Stability · Recommended · Visuals · More content), each labeled by Skyrim Together compatibility. **Install, update-check and uninstall** in one place. Add any Nexus mod by link, or install from an archive. For SKSE mods, it shows whether they **actually loaded** on your game version. |
 | 🧹 **Cleanup** | Moves Anniversary Edition add-ons into a backup, **keeping the 4 free ones USSEP needs**. Also flags known-incompatible mods, and lets you switch off or set aside any plugin, with a warning if other mods depend on it. |
@@ -82,6 +83,16 @@ The app finds Skyrim through Steam. If it doesn't, point it at the folder that c
 ---
 
 ## 🎮 Quick start for a campaign with friends
+
+**Friends setting up from scratch:** install Skyrim from Steam, open STR Companion and go to **Quick Setup**:
+1. Paste the host's setup code (they copy it from **Friends Sync**, or from **Copy invite** on the Play page).
+2. Click **Open my API key page**, copy your *Personal API Key* from Nexus Mods (a free account works) and paste it in.
+3. Free account? Turn on **Let STR Companion handle "Mod Manager Download" links**.
+4. Click **Set up everything**. Free accounts click **Slow download** on each Nexus page that opens; everything else is automatic.
+5. When it says you match the host, launch from **Play & Server**.
+
+**Hosting, or setting it up by hand:**
+
 
 1. **Everyone:** open STR Companion and go through the **Dashboard** until everything is green or yellow.
 2. **Everyone:** **Cleanup → Move Anniversary add-ons to backup**, unless you all own and enable exactly the same ones.

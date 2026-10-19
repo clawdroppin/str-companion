@@ -57,10 +57,19 @@ class Nexus {
     return request(`${API}/games/${GAME}/mods/${id}/files.json`, this.apiKey);
   }
 
-  /** Direct download links. Nexus only allows this for Premium accounts. */
-  downloadLinks(modId, fileId) {
-    return request(`${API}/games/${GAME}/mods/${modId}/files/${fileId}/download_link.json`, this.apiKey);
+  /**
+   * Direct download links. Premium accounts can ask anytime; free accounts need the one-time key and
+   * expiry from an nxm:// link, which Nexus hands out when they click "Mod Manager Download".
+   */
+  downloadLinks(modId, fileId, nxm = null) {
+    const q = nxm && nxm.key ? `?key=${encodeURIComponent(nxm.key)}&expires=${encodeURIComponent(nxm.expires)}` : '';
+    return request(`${API}/games/${GAME}/mods/${modId}/files/${fileId}/download_link.json${q}`, this.apiKey);
   }
+}
+
+/** Opens the Nexus "Mod Manager Download" page for one specific file. */
+function fileDownloadUrl(modId, fileId) {
+  return `https://www.nexusmods.com/${GAME}/mods/${Number(modId)}?tab=files&file_id=${Number(fileId)}&nmm=1`;
 }
 
 /** The newest main file of a mod (what "update" should mean for most mods). */
@@ -108,4 +117,4 @@ function download(url, dest, onProgress) {
   });
 }
 
-module.exports = { Nexus, latestMainFile, modUrl, parseModRef, download };
+module.exports = { Nexus, latestMainFile, modUrl, fileDownloadUrl, parseModRef, download, GAME };
