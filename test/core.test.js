@@ -20,6 +20,16 @@ const { run } = util;
 
 const { pluginBytes, fakeGame } = require('./fixtures');
 
+// Every test works in strc-* folders under the temp dir; remove the ones this run created.
+const suiteStarted = Date.now() - 1000;
+test.after(() => {
+  for (const name of fs.readdirSync(os.tmpdir())) {
+    if (!/^strc-/.test(name) || /^strc-shots-profile/.test(name)) continue;
+    const full = path.join(os.tmpdir(), name);
+    try { if (fs.statSync(full).birthtimeMs >= suiteStarted) fs.rmSync(full, { recursive: true, force: true }); } catch {}
+  }
+});
+
 test('ini round-trips byte for byte and edits in place', () => {
   const text = '[general]\r\n; How much detail\r\nsLogLevel=info\r\n\r\n[Gameplay]\r\nbEnablePvp=false\r\n';
   const doc = new IniDoc(text);
