@@ -1,6 +1,20 @@
 'use strict';
 /* global api */
 
+// ---------- error capture ----------
+// Programming errors (TypeError and friends) anywhere in the page are kept here so the UI check can
+// fail on them, even when they don't visibly break anything. Expected errors (a bad code, a refused
+// network call) are plain Errors and are shown as toasts instead.
+window.__errors = [];
+const isBug = e => e && /^(TypeError|ReferenceError|SyntaxError|RangeError)$/.test(e.name);
+function recordBug(where, e) {
+  window.__errors.push(`${where}: ${e.name}: ${e.message}`);
+  // Also into the app log, so a bug report shows it.
+  try { api.call('app:logError', where, e.stack || `${e.name}: ${e.message}`).catch(() => {}); } catch { /* ignore */ }
+}
+window.addEventListener('error', e => { if (isBug(e.error)) recordBug('window', e.error); });
+window.addEventListener('unhandledrejection', e => { if (isBug(e.reason)) recordBug('promise', e.reason); });
+
 // ---------- tiny helpers ----------
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -110,7 +124,14 @@ async function renderNow() {
   try {
     await pages[state.page]();
   } catch (e) {
-    if (e.message !== 'NO_GAME') main().innerHTML = `<div class="empty render-error">Something went wrong: ${esc(e.message)}</div>`;
+    if (isBug(e)) recordBug(`page ${state.page}`, e);
+    if (e.message !== 'NO_GAME') {
+      // Never a dead end: retry, or package everything up for whoever helps.
+      main().innerHTML = `<div class="empty render-error">Something went wrong: ${esc(e.message)}
+        <div class="row" style="justify-content:center;margin-top:12px"><button class="btn" id="retryPage">Try again</button><button class="btn" id="errReport">🐞 Create bug report</button></div></div>`;
+      $('#retryPage').addEventListener('click', () => render());
+      $('#errReport').addEventListener('click', e2 => createBugReport(e2.currentTarget));
+    }
   }
 }
 
@@ -131,7 +152,11 @@ async function selfUpdate() {
   if (!up.canSelfUpdate) return call('shell:external', up.url);
   if (!await confirmBox(`Update to ${up.latest}?`, 'STR Companion downloads the new version, checks it against the release checksum, and restarts. Your settings and backups stay.', 'Update now')) return;
   const close = modal('<h2>Updating…</h2><div class="sub"><span class="spinner"></span> Downloading and verifying the new version. The app restarts by itself.</div><div class="progress"><div id="selfProg"></div></div>');
-  try { await api.call('app:selfUpdate'); } catch (e) { close(); toast(e.message, 'err'); }
+  try {
+    const r = await api.call('app:selfUpdate');
+    // Already up to date (e.g. updated in another window): don't leave the dialog hanging.
+    if (r && r.upToDate) { close(); toast('You already have the newest version', 'ok'); }
+  } catch (e) { close(); toast(e.message, 'err'); }
 }
 
 function renderWelcome() {
@@ -234,6 +259,8 @@ async function setupPage() {
   let d;
   // A bad code shows an error toast; fall back to the last good code so the page still works.
   try { d = await call('setup:plan', code); } catch { d = await call('setup:plan', ''); }
+  // Older versions of the main process may not send every field; never let one missing field break the page.
+  d.nxm = d.nxm || { registered: false, owner: null };
   setupRunning = setupRunning || d.running;
   const p = d.plan;
   const keyCard = !d.hasNexusKey ? `
@@ -247,8 +274,8 @@ async function setupPage() {
         <button class="btn primary" id="saveKey">Save key</button></div>`
     : d.premium ? '<div class="callout blue">✓ <b>Premium account</b> — every mod downloads and installs automatically.</div>'
       : `<div class="sub">✓ Connected (free account). Nexus only lets Premium accounts download automatically, so free accounts click <b>"Slow download"</b> once per mod — the app does everything else.</div>
-        <label class="row" style="cursor:pointer;margin-top:10px"><span class="switch"><input type="checkbox" id="nxmToggle" ${d.nxm.registered ? 'checked' : ''}><span></span></span>
-          <span><b>Let STR Companion handle "Mod Manager Download" links</b><br><span class="sub">Each click on Nexus then installs the right file straight away.${d.nxm.owner ? ` Right now <b>${esc(d.nxm.owner)}</b> handles them — turning this on takes them over; ${esc(d.nxm.owner)} can take them back from its own settings.` : ''}</span></span></label>
+        <label class="row toggle" style="cursor:pointer;margin-top:10px"><span class="switch"><input type="checkbox" id="nxmToggle" ${d.nxm.registered ? 'checked' : ''}><span></span></span>
+          <span><b>Let STR Companion handle "Mod Manager Download" links</b><br><span class="sub">Each click on Nexus then installs the right file straight away.${d.nxm.owner ? (d.nxm.ownerMissing ? ` They're currently set to open <b>${esc(d.nxm.owner)}</b>, which isn't on this PC anymore — nothing is lost by turning this on.` : ` Right now <b>${esc(d.nxm.owner)}</b> handles them — turning this on takes them over; ${esc(d.nxm.owner)} can take them back from its own settings.`) : ''}</span></span></label>
         ${!d.nxm.registered ? '<div class="sub" style="margin-top:6px">Off: you click <b>Manual download</b> instead, and the app picks the file up from your Downloads folder.</div>' : ''}`;
 
   const stepsHtml = p ? p.steps.map(s => `
@@ -266,7 +293,7 @@ async function setupPage() {
       <div class="sub">Ask your host to copy it from <b>Friends Sync</b> (or the Copy invite message).</div>
       <textarea id="setupCode" rows="3" placeholder="STR2-…" style="margin-top:10px">${esc(d.code || '')}</textarea>
       <div class="row" style="margin-top:10px"><button class="btn primary" id="check">${p ? 'Check again' : 'Check'}</button>
-        ${d.host ? `<span class="sub">Host: <b>${esc(d.host.playerName || 'unnamed')}</b> · Skyrim ${esc(d.host.gameVersion)} · Skyrim Together ${esc(d.host.strVersion || '?')} · ${d.host.mods} mods · ${d.host.plugins} plugins</span>` : ''}</div>
+        ${d.codeError ? `<span class="sub" style="color:var(--err)">${esc(d.codeError)}</span>` : ''}${d.host ? `<span class="sub">Host: <b>${esc(d.host.playerName || 'unnamed')}</b> · Skyrim ${esc(d.host.gameVersion)} · Skyrim Together ${esc(d.host.strVersion || '?')} · ${d.host.mods} mods · ${d.host.plugins} plugins</span>` : ''}</div>
     </div>
     <div class="card"><h2>2. Your Nexus Mods account</h2>${keyCard}</div>
     ${p ? `<div class="card">
@@ -481,8 +508,8 @@ async function deck() {
         ${row(!!(p && p.launchOptionSet), 'Skyrim\'s launch options', p && p.launchOptionSet ? `Set for ${p.accounts} Steam account${p.accounts === 1 ? '' : 's'}.` : 'Not set yet.')}
       </div>
       ${playReady ? `<h3>When you press Play</h3>
-        <label class="row" style="cursor:pointer;margin-bottom:10px"><span class="switch"><input type="checkbox" id="flagSnap" ${p.flags.autoSnapshot ? 'checked' : ''}><span></span></span><span><b>Snapshot my saves first</b><br><span class="sub">Same snapshots as on the Backups page; old automatic ones are pruned when you next open the app.</span></span></label>
-        <label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="flagSolo" ${p.flags.solo ? 'checked' : ''}><span></span></span><span><b>Play solo (start normal Skyrim)</b><br><span class="sub">Play passes straight through to the normal launcher. Switch it off again for co-op — no Steam restart needed.</span></span></label>` : ''}
+        <label class="row toggle" style="cursor:pointer;margin-bottom:10px"><span class="switch"><input type="checkbox" id="flagSnap" ${p.flags.autoSnapshot ? 'checked' : ''}><span></span></span><span><b>Snapshot my saves first</b><br><span class="sub">Same snapshots as on the Backups page; old automatic ones are pruned when you next open the app.</span></span></label>
+        <label class="row toggle" style="cursor:pointer"><span class="switch"><input type="checkbox" id="flagSolo" ${p.flags.solo ? 'checked' : ''}><span></span></span><span><b>Play solo (start normal Skyrim)</b><br><span class="sub">Play passes straight through to the normal launcher. Switch it off again for co-op — no Steam restart needed.</span></span></label>` : ''}
     </div>` : ''}
     <div class="card">
       <div class="card-head"><div><h2>Open STR Companion from Steam</h2><div class="sub">Adds this app to your Steam library as a non-Steam game${linux ? ', so you can open it in Gaming Mode to check your setup, sync with friends or start the server' : ''}.</div></div>

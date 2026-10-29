@@ -110,6 +110,9 @@ h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: va
 .btn:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
 .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .spacer { flex: 1; }
+/* A switch next to a long explanation: keep them side by side instead of wrapping the text below. */
+.row.toggle { flex-wrap: nowrap; align-items: flex-start; }
+.row.toggle .switch { margin-top: 2px; }
 
 input[type=text], input[type=number], input[type=password], select, textarea {
   background: #15120e; color: var(--text); border: 1px solid var(--line); border-radius: 8px;

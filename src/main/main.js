@@ -55,7 +55,26 @@ function updateSettings(patch) {
 
 // Decrypting goes through the OS keyring, so keep the key in memory instead of decrypting per request.
 let nexusKeyCache;
+/**
+ * Test-only stand-in for the Nexus API (STRC_NEXUS_MOCK=free|premium), so UI checks can exercise the
+ * signed-in branches without a real key or network. Never active unless that variable is set.
+ */
+function mockNexus(kind) {
+  const premium = kind === 'premium';
+  return {
+    apiKey: 'mock', configured: true,
+    validate: async () => ({ name: 'Test account', is_premium: premium }),
+    mod: async id => ({ name: `Mod ${id}`, version: '1.0', summary: 'Test mod', updated_time: new Date().toISOString() }),
+    files: async () => ({ files: [{ file_id: 1, name: 'Main', file_name: 'Main-1-1-0-1700000000.7z', version: '1.0', category_name: 'MAIN', uploaded_timestamp: 1700000000 }] }),
+    downloadLinks: async () => { throw new Error('Downloads are disabled in test mode'); },
+  };
+}
+function makeNexus(key) {
+  return process.env.STRC_NEXUS_MOCK ? mockNexus(process.env.STRC_NEXUS_MOCK) : new Nexus(key);
+}
+
 function nexusKey() {
+  if (process.env.STRC_NEXUS_MOCK) return 'mock';
   if (nexusKeyCache !== undefined) return nexusKeyCache;
   const s = loadSettings();
   nexusKeyCache = null;
@@ -85,7 +104,7 @@ function ctx() {
   // On Linux the game's Documents folder is inside the Proton prefix, which gamePaths works out itself.
   const paths = game.gamePaths(s.gameDir, process.platform === 'win32' ? { documentsDir: app.getPath('documents') } : {});
   const backups = new BackupStore(paths);
-  return { s, paths, backups, installer: new Installer(paths, appDataDir(), backups), nexus: new Nexus(nexusKey()) };
+  return { s, paths, backups, installer: new Installer(paths, appDataDir(), backups), nexus: makeNexus(nexusKey()) };
 }
 
 /** Folders made by hand before this app existed (e.g. _CoopBackup_2026-10-15/CreationClub) become restorable batches. */
@@ -97,11 +116,31 @@ function adoptLegacyBackups(c) {
   }
 }
 
+/** The app's own log (userData/logs/app.log): errors with the action that hit them. Kept to ~1 MB. */
+function appLogFile() {
+  return path.join(appDataDir(), 'logs', 'app.log');
+}
+function logError(where, err) {
+  try {
+    const file = appLogFile();
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    try { if (fs.statSync(file).size > 1 << 20) fs.renameSync(file, file + '.old'); } catch {}
+    const msg = err && err.stack ? err.stack : String(err && err.message ? err.message : err);
+    fs.appendFileSync(file, `[${new Date().toISOString()}] ${app.getVersion()} ${where}: ${msg}
+`);
+  } catch { /* logging must never break the app */ }
+}
+process.on('uncaughtException', e => logError('uncaught', e));
+process.on('unhandledRejection', e => logError('unhandled rejection', e));
+
+// Expected failures (bad input, network) carry a plain message; anything else is a bug and gets logged.
+const EXPECTED = new Set(['NO_GAME']);
 function handle(channel, fn) {
   ipcMain.handle(channel, async (_e, ...args) => {
     try {
       return { ok: true, data: await fn(...args) };
     } catch (err) {
+      if (!EXPECTED.has(err.message) && (/^(TypeError|ReferenceError|RangeError|SyntaxError)$/.test(err.name) || process.env.STRC_LOG_ALL)) logError(channel, err);
       return { ok: false, error: err.message };
     }
   });
@@ -383,7 +422,7 @@ handle('downloads:stop', () => { if (manualWatch) manualWatch.cancel(); manualWa
 handle('nexus:setKey', async key => {
   key = String(key || '').trim();
   if (!key) { updateSettings({ nexusKeyEnc: null }); nexusKeyCache = null; return { cleared: true }; }
-  const user = await new Nexus(key).validate();
+  const user = await makeNexus(key).validate();
   if (!safeStorage.isEncryptionAvailable()) throw new Error(process.platform === 'win32' ? 'Windows secure storage is unavailable, so the key cannot be saved safely.' : 'No system keyring is available (install gnome-keyring or KWallet), so the key cannot be saved safely.');
   updateSettings({ nexusKeyEnc: safeStorage.encryptString(key).toString('base64') });
   nexusKeyCache = key;
@@ -392,7 +431,7 @@ handle('nexus:setKey', async key => {
 handle('nexus:status', async () => {
   const k = nexusKey();
   if (!k) return { configured: false };
-  try { const u = await new Nexus(k).validate(); return { configured: true, name: u.name, premium: !!u.is_premium }; }
+  try { const u = await makeNexus(k).validate(); return { configured: true, name: u.name, premium: !!u.is_premium }; }
   catch (e) { return { configured: true, error: e.message }; }
 });
 handle('nexus:openKeyPage', () => shell.openExternal('https://next.nexusmods.com/settings/api-keys'));
@@ -654,13 +693,18 @@ async function nxmStatus() {
   if (process.platform === 'win32') {
     const { exe, args } = launchCommand();
     const registered = app.isDefaultProtocolClient('nxm', exe, args);
-    let owner = null;
+    let owner = null, ownerMissing = false;
     if (!registered) {
       const r = await util.run('reg', ['query', 'HKCR\\nxm\\shell\\open\\command', '/ve']);
       const m = r.stdout.match(/REG_SZ\s+(.+)/);
-      if (m) owner = /vortex/i.test(m[1]) ? 'Vortex' : /modorganizer|nxmhandler/i.test(m[1]) ? 'Mod Organizer 2' : 'another program';
+      if (m) {
+        // Name the program, and notice when it points at a file that no longer exists.
+        const exe = (m[1].match(/^"([^"]+)"/) || m[1].match(/^(S+)/) || [])[1] || '';
+        owner = /vortex/i.test(exe) ? 'Vortex' : /modorganizer|nxmhandler/i.test(exe) ? 'Mod Organizer 2' : (path.win32.basename(exe).replace(/.exe$/i, '') || 'another program');
+        ownerMissing = !!exe && !util.exists(exe);
+      }
     }
-    return { registered, owner };
+    return { registered, owner, ownerMissing };
   }
   const r = await util.run('xdg-mime', ['query', 'default', 'x-scheme-handler/nxm']);
   const current = r.stdout.trim();
@@ -757,21 +801,27 @@ function setupLocalState(c) {
 
 handle('setup:plan', async code => {
   const c = ctx();
-  const text = String(code || c.s.setupCode || '').trim();
-  if (!text) return { plan: null, hasNexusKey: c.nexus.configured };
-  const host = share.parseCode(text);
-  if (code) updateSettings({ setupCode: text });
-  const { local } = setupLocalState(c);
+  // The account part is always returned, so the page renders the same way with or without a code.
   let premium = null;
   if (c.nexus.configured) { try { premium = !!(await c.nexus.validate()).is_premium; } catch { premium = null; } }
+  const base = { code: '', host: null, plan: null, codeError: null, hasNexusKey: c.nexus.configured, premium, nxm: await nxmStatus(), running: !!setupRun };
+  const text = String(code || c.s.setupCode || '').trim();
+  if (!text) return base;
+  let host;
+  try {
+    host = share.parseCode(text);
+  } catch (e) {
+    // A code typed just now is reported as an error; a stale saved one just shows the message.
+    if (code) throw e;
+    return { ...base, code: text, codeError: e.message };
+  }
+  if (code) updateSettings({ setupCode: text });
+  const { local } = setupLocalState(c);
   return {
+    ...base,
     code: text,
     host: { playerName: host.playerName, gameVersion: host.gameVersion, strVersion: host.strVersion, plugins: host.plugins.length, mods: host.mods.length },
     plan: setup.buildPlan(host, local),
-    hasNexusKey: c.nexus.configured,
-    premium,
-    nxm: await nxmStatus(),
-    running: !!setupRun,
   };
 });
 
@@ -1023,6 +1073,9 @@ handle('upnp:open', () => upnp.openPort(serverPort(ctx())));
 handle('upnp:close', () => upnp.closePort(serverPort(ctx())));
 
 // ---------- bug report ----------
+// Programming errors in the window are logged here too, so bug reports include them.
+handle('app:logError', (where, message) => { logError(`window ${String(where).slice(0, 80)}`, String(message).slice(0, 4000)); return true; });
+
 handle('report:create', async () => {
   const c = ctx();
   const snap = health.snapshot(c.paths);
@@ -1032,6 +1085,7 @@ handle('report:create', async () => {
     checks: health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen }),
     vortexMods: game.vortexMods(c.paths),
     outDir: app.getPath('desktop'),
+    extraFiles: [appLogFile(), appLogFile() + '.old'],
     zipExe: sevenZip().exe,
   });
   shell.showItemInFolder(file);
@@ -1135,9 +1189,17 @@ function captureAllPages(dir) {
       'friends:compare': `document.querySelector('#theirCode').value = ${JSON.stringify(process.env.STRC_COMPARE_CODE || '')} || document.querySelector('.copyable code').textContent; document.querySelector('#compare').click()`,
       // Quick Setup with a code (the compare code, or my own) so the plan renders.
       'setup:plan': `(async () => { const own = ${JSON.stringify(process.env.STRC_COMPARE_CODE || '')} || (await api.call('share:mine')).code; document.querySelector('#setupCode').value = own; document.querySelector('#check').click(); })()`,
+      // Premium test scenario only (fake game, stand-in Nexus with downloads disabled): run the whole
+      // "Set up everything" flow — mods fail cleanly, then cleanup and load order run for real.
+      ...(process.env.STRC_NEXUS_MOCK === 'premium' && process.env.STRC_GAME_DIR ? {
+        'setup:run': `(async () => { await new Promise(r => setTimeout(r, 1500)); document.querySelector('#runSetup')?.click(); await new Promise(r => setTimeout(r, 400)); document.querySelector('#okBtn')?.click(); await new Promise(r => setTimeout(r, 6000)); })()`,
+      } : {}),
     };
     const steps = [...pages, ...Object.keys(extra)];
+    // A broken page must not stop the check: record the step's failure, carry on, and always quit.
+    try {
     for (const step of steps) {
+      try {
       const [p] = step.split(':');
       await win.webContents.executeJavaScript(`document.querySelector('#nav [data-page="${p}"]').click()`);
       if (extra[step]) {
@@ -1150,11 +1212,31 @@ function captureAllPages(dir) {
       const img = await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
       fs.writeFileSync(path.join(dir, `${step.replace(":", "-")}.png`), img.toPNG());
       report[step] = await win.webContents.executeJavaScript(`({ h1: document.querySelector('main h1')?.textContent, error: document.querySelector('main .render-error')?.textContent || null })`);
+      // Click through every tab on the page too (each click re-renders, so look the tabs up again each time).
+      if (!extra[step]) {
+        const count = await win.webContents.executeJavaScript(`document.querySelectorAll('main .tabs button').length`);
+        const tabErrors = [];
+        for (let i = 0; i < count; i++) {
+          await win.webContents.executeJavaScript(`document.querySelectorAll('main .tabs button')[${i}]?.click()`);
+          await wait(900);
+          const err = await win.webContents.executeJavaScript(`document.querySelector('main .render-error')?.textContent || null`);
+          if (err) tabErrors.push(`tab ${i}: ${err}`);
+        }
+        if (count) report[step].tabs = count;
+        if (tabErrors.length) report[step].error = [report[step].error, ...tabErrors].filter(Boolean).join(' | ');
+      }
+      } catch (e) {
+        report[step] = { ...(report[step] || {}), error: `check step failed: ${e.message}` };
+      }
     }
-    fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2));
-    app.quit();
+    } finally {
+      try { report.__errors = await win.webContents.executeJavaScript('window.__errors'); } catch { report.__errors = ['could not read errors'] }
+      fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(report, null, 2));
+      app.quit();
+    }
   });
 }
+
 
 // Screenshot/test runs get their own profile, so they never touch real settings and can run next to
 // an open copy of the app.

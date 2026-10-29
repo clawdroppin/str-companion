@@ -50,7 +50,7 @@ function diagnosticsText({ appVersion, snapshot, checks, vortexMods }) {
  * Builds the zip. Returns its path.
  * @param zipExe path to 7-Zip
  */
-async function createReport(paths, { appVersion, snapshot, checks, vortexMods, outDir, zipExe }) {
+async function createReport(paths, { appVersion, snapshot, checks, vortexMods, outDir, zipExe, extraFiles = [] }) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'strc-report-'));
   try {
     const put = (name, text) => {
@@ -61,6 +61,8 @@ async function createReport(paths, { appVersion, snapshot, checks, vortexMods, o
     put('diagnostics.txt', diagnosticsText({ appVersion, snapshot, checks, vortexMods }));
     for (const l of logs.logFiles(paths)) if (l.exists) put(path.join('logs', path.basename(l.file)), readTail(l.file, 2 << 20));
     for (const c of logs.crashFiles(paths).slice(0, 3)) put(path.join('crashes', c.name), readTail(c.file, 2 << 20));
+    // STR Companion's own log.
+    for (const f of extraFiles) if (exists(f)) put(path.join('app', path.basename(f)), readTail(f, 1 << 20));
     for (const n of ['Plugins.txt', 'loadorder.txt']) {
       const f = resolveCI(paths.localAppDir, n);
       if (exists(f)) put(path.join('plugins', n), fs.readFileSync(f, 'utf8'));

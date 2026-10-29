@@ -20,7 +20,7 @@ STRC_GAME_DIR=<fake game> STRC_SHOTS=<dir> npm start        # against a fixture 
 xvfb-run -a npx electron . --no-sandbox                     # (Linux CI) with the two env vars above
 ```
 
-Before you finish any change: run `npm test`, then run the `STRC_SHOTS` check and confirm `report.json` shows the right `h1` and `"error": null` for every page. Look at the PNGs for layout problems. Screenshot mode renders offscreen, so frames are always current. CI (`.github/workflows/ci.yml`) runs the tests on Windows and Ubuntu, runs the Linux UI check against a fixture, and on a published release builds and attaches the downloads for both platforms.
+Before you finish any change: run `npm test` and `node scripts/ui-check.js` (add `--real "<game dir>"` locally). The runner opens the app as several kinds of user (fresh, free Nexus account, Premium account with a different host via the test-only `STRC_NEXUS_MOCK` stand-in), clicks every page and tab, runs a full Quick Setup in the Premium scenario, and fails on any broken page or hidden programming error (`window.__errors`). Then run the `STRC_SHOTS` check and confirm `report.json` shows the right `h1` and `"error": null` for every page. Look at the PNGs for layout problems. Screenshot mode renders offscreen, so frames are always current. CI (`.github/workflows/ci.yml`) runs the tests on Windows and Ubuntu, runs the Linux UI check against a fixture, and on a published release builds and attaches the downloads for both platforms.
 
 ## Cross-platform rules
 
@@ -84,6 +84,8 @@ The renderer talks to the main process only through `api.call(channel, ...args)`
 8. **nxm:// links can come from any website.** Only install from one without asking when the Quick Setup run is waiting for that exact mod id (`nxmWaiters`); otherwise the renderer must confirm (`nxm:incoming`).
 9. **Contain paths.** Any relative path from the renderer, a manifest or an archive goes through `util.isInside(gameDir, …)` before files are moved or written.
 10. **Don't block the main process** with big file copies; use `fs.promises` (snapshots, installs). A blocked main process freezes the window.
+12. **Return complete shapes from IPC handlers.** Every branch of a handler returns the same fields (use a `base` object and spread it), because pages read them without guards. Quick Setup once crashed on a missing `nxm` field in an early return.
+13. **Errors:** programming errors are logged to `userData/logs/app.log` (main: `logError`, window: `app:logError`) and included in bug reports. Throw plain `Error`s with user-readable messages for expected failures.
 11. **Dialogs:** use `confirmBox()` / `modal(html, onMount, onDismiss)`; dismissal (Esc, backdrop, Cancel) must resolve the caller.
 
 ## Domain facts the code relies on

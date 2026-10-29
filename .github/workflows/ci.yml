@@ -41,17 +41,11 @@ jobs:
       - run: npm ci
       - name: Install display server
         run: sudo apt-get update && sudo apt-get install -y xvfb
-      - name: Screenshot every page against a fake Proton install
-        run: |
-          GAME=$(node test/fixtures.js "$RUNNER_TEMP/fake")
-          echo "Fake game: $GAME"
-          STRC_GAME_DIR="$GAME" STRC_SHOTS="$PWD/shots" timeout 120 xvfb-run -a npx electron . --no-sandbox
-          node -e "
-            const r = require('./shots/report.json');
-            console.log(r);
-            const bad = Object.entries(r).filter(([, v]) => v.error || !v.h1);
-            if (Object.keys(r).length < 10 || bad.length) { console.error('Broken pages:', bad); process.exit(1); }
-          "
+      - name: Click through every page and tab as three kinds of user
+        run: STRC_KEEP_SHOTS=1 xvfb-run -a node scripts/ui-check.js
+      - name: Collect screenshots
+        if: always()
+        run: mkdir -p shots && for d in /tmp/strc-uicheck-*/shots-*; do [ -d "$d" ] && cp -r "$d" shots/; done || true
       - uses: actions/upload-artifact@v4
         with:
           name: linux-screenshots

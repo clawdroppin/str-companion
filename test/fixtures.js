@@ -104,18 +104,24 @@ function fakeGame(opts = {}) {
   return { root, paths };
 }
 
-module.exports = { pluginBytes, exeWithVersion, fakeGame };
-
-if (require.main === module) {
-  const dir = path.resolve(process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'strc-fake-')));
-  fs.mkdirSync(dir, { recursive: true });
-  const { paths } = fakeGame({ root: dir, proton: true });
-  // A sample crash report, so the UI check covers the crash reader too.
+/** A sample Crash Logger report, so the crash reader has something to show. */
+function addCrashLog(paths) {
   fs.mkdirSync(paths.skseLogs, { recursive: true });
   fs.writeFileSync(path.join(paths.skseLogs, 'crash-2026-10-18-21-00-00.log'), [
     'Unhandled exception "EXCEPTION_ACCESS_VIOLATION" at 0x7FF712345678 SkyrimSE.exe+0ABCDEF',
     '', 'PROBABLE CALL STACK:', '\t[0] 0x7FF712345678 SkyrimSE.exe+0ABCDEF', '\t[1] 0x7FFA00001234 ExampleMod.dll+0001234',
     '', 'POSSIBLE RELEVANT OBJECTS:', '\tFile: "Addon.esp"', '', 'PLUGINS:', '\t[00] Skyrim.esm',
   ].join('\n'));
+}
+
+module.exports = { pluginBytes, exeWithVersion, fakeGame, addCrashLog };
+
+if (require.main === module) {
+  const dir = path.resolve(process.argv[2] || fs.mkdtempSync(path.join(os.tmpdir(), 'strc-fake-')));
+  fs.mkdirSync(dir, { recursive: true });
+  const { paths } = fakeGame({ root: dir, proton: true });
+  // A sample crash report, so the UI check covers the crash reader too.
+  addCrashLog(paths);
   process.stdout.write(paths.gameDir + '\n');
 }
+
