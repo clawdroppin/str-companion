@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, safeStorage, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -19,6 +19,11 @@ const { BackupStore } = require('../core/backup');
 const { Installer, ARCHIVE_EXT } = require('../core/installer');
 const { Nexus, modUrl, fileDownloadUrl, parseModRef, download, GAME } = require('../core/nexus');
 const setup = require('../core/setup');
+const steamdeck = require('../core/steamdeck');
+const upnp = require('../core/upnp');
+const report = require('../core/report');
+const selfupdate = require('../core/selfupdate');
+const { sevenZip } = require('../core/installer');
 const { IniDoc } = require('../core/ini');
 
 let win;
@@ -27,7 +32,7 @@ const settingsFile = () => path.join(appDataDir(), 'settings.json');
 
 const DEFAULT_SETTINGS = {
   gameDir: null, playerName: os.userInfo().username, customMods: [], checklist: {}, party: [],
-  autoSnapshot: true, keepAutoSnapshots: 10,
+  autoSnapshot: true, keepAutoSnapshots: 10, extraBackupDir: null, uiScale: 1,
 };
 
 function loadSettings() {
@@ -115,7 +120,12 @@ handle('app:init', async () => {
   // No folder yet, or the saved one is gone (game moved to another library): use what Steam reports.
   if ((!s.gameDir || !game.isGameDir(s.gameDir)) && detected.length) { s.gameDir = detected[0]; saveSettings(s); }
   const valid = !!s.gameDir && game.isGameDir(s.gameDir);
-  if (valid) adoptLegacyBackups(ctx());
+  if (valid) {
+    const c = ctx();
+    adoptLegacyBackups(c);
+    // Snapshots taken by the Steam Deck Play wrapper are pruned here, since the wrapper is a plain shell script.
+    try { c.backups.pruneAutoSnapshots(c.s.keepAutoSnapshots); } catch {}
+  }
   return {
     gameDir: s.gameDir, valid, detected, playerName: s.playerName, hasNexusKey: !!nexusKey(), version: app.getVersion(),
     platform: process.platform,
@@ -133,11 +143,17 @@ handle('game:pickDir', async () => {
   return dir;
 });
 
-const PUBLIC_SETTINGS = ['playerName', 'checklist', 'autoSnapshot', 'keepAutoSnapshots'];
+const PUBLIC_SETTINGS = ['playerName', 'checklist', 'autoSnapshot', 'keepAutoSnapshots', 'extraBackupDir', 'uiScale'];
 handle('settings:set', patch => {
   const allowed = {};
   for (const k of PUBLIC_SETTINGS) if (k in patch) allowed[k] = patch[k];
   if ('keepAutoSnapshots' in allowed) allowed.keepAutoSnapshots = Math.max(1, Math.min(100, Number(allowed.keepAutoSnapshots) || 10));
+  if ('uiScale' in allowed) {
+    allowed.uiScale = Math.max(0.7, Math.min(1.6, Number(allowed.uiScale) || 1));
+    if (win && !win.isDestroyed()) win.webContents.setZoomFactor(allowed.uiScale);
+  }
+  // The extra backup folder is only ever set through the folder picker (settings:pickBackupDir); here it can just be cleared.
+  if ('extraBackupDir' in allowed && allowed.extraBackupDir) delete allowed.extraBackupDir;
   const s = updateSettings(allowed);
   return Object.fromEntries(PUBLIC_SETTINGS.map(k => [k, s[k]]));
 });
@@ -387,14 +403,25 @@ handle('launch:client', async () => {
   const c = ctx();
   const st = await launch.status();
   if (st.game || st.client) throw new Error('Skyrim is already running.');
-  // A copy of the saves before every session, so a bad sync or crash can always be undone.
+  // Linux with the Play wrapper set up: start through Steam, which runs Skyrim Together under Proton.
+  let viaSteam = false;
+  if (process.platform === 'linux') {
+    try { viaSteam = playWrapperState(c, await steamRoot()).launchOptionSet && !steamdeck.flags(c.paths.gameDir).solo; } catch {}
+  }
+  // A copy of the saves before every session, so a bad sync or crash can always be undone
+  // (the Play wrapper takes its own when that's switched on there).
   let snapshot = null;
-  if (c.s.autoSnapshot && util.walkFiles(c.paths.saves).length) {
+  const wrapperSnapshots = viaSteam && steamdeck.flags(c.paths.gameDir).autoSnapshot;
+  if (c.s.autoSnapshot && !wrapperSnapshots && util.walkFiles(c.paths.saves).length) {
     try {
-      snapshot = await c.backups.snapshotSaves('Automatic, before launch', { auto: true, keepAuto: c.s.keepAutoSnapshots });
+      snapshot = await c.backups.snapshotSaves('Automatic, before launch', { auto: true, keepAuto: c.s.keepAutoSnapshots, mirrorDir: c.s.extraBackupDir });
     } catch (e) {
       snapshot = { error: e.message };
     }
+  }
+  if (viaSteam) {
+    launch.openSteamUrl(`steam://rungameid/${game.APP_ID}`);
+    return { steamStarted: !st.steam, snapshot, viaSteam: true };
   }
   if (!st.steam) launch.openSteam();
   launch.launchClient(c.paths);
@@ -411,7 +438,13 @@ handle('launch:restartServer', async () => {
 
 // ---------- save snapshots ----------
 handle('saves:list', () => ctx().backups.listSaveSnapshots());
-handle('saves:snapshot', note => ctx().backups.snapshotSaves(note || ''));
+handle('saves:snapshot', note => { const c = ctx(); return c.backups.snapshotSaves(note || '', { mirrorDir: c.s.extraBackupDir }); });
+handle('settings:pickBackupDir', async () => {
+  const r = await dialog.showOpenDialog(win, { title: 'Pick a folder for an extra copy of every save snapshot', properties: ['openDirectory', 'createDirectory'] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  updateSettings({ extraBackupDir: r.filePaths[0] });
+  return r.filePaths[0];
+});
 handle('saves:delete', id => ctx().backups.deleteSaveSnapshot(id));
 handle('saves:restore', async id => {
   const st = await launch.status();
@@ -428,7 +461,7 @@ handle('app:checkUpdate', async () => {
   const rel = JSON.parse(r.body);
   const latest = String(rel.tag_name || '').replace(/^v/, '');
   const url = /^https:\/\/github\.com\//.test(rel.html_url) ? rel.html_url : `https://github.com/${REPO}/releases/latest`;
-  return { latest, url, hasUpdate: !!latest && util.compareVersions(latest, app.getVersion()) > 0 };
+  return { latest, url, hasUpdate: !!latest && util.compareVersions(latest, app.getVersion()) > 0, canSelfUpdate: !!(process.env.PORTABLE_EXECUTABLE_FILE || process.env.APPIMAGE) };
 });
 handle('server:session', () => logs.serverSession(ctx().paths));
 handle('net:info', () => {
@@ -856,6 +889,191 @@ handle('setup:run', async (opts = {}) => {
   return { summary, inSync, cancelled: run.cancelled };
 });
 
+// ---------- Steam Deck / Steam integration ----------
+
+/** The Steam install that holds userdata (launch options, shortcuts). */
+async function steamRoot() {
+  for (const p of await game.steamPaths()) if (util.exists(path.join(p, 'userdata'))) return p;
+  throw new Error("Couldn't find Steam's userdata folder.");
+}
+
+function steamCommand(root) {
+  if (process.platform === 'win32') return { cmd: path.join(root, 'steam.exe'), args: [] };
+  if (root.includes(path.join('.var', 'app', 'com.valvesoftware.Steam'))) return { cmd: 'flatpak', args: ['run', 'com.valvesoftware.Steam'] };
+  return { cmd: util.which('steam') || 'steam', args: [] };
+}
+
+/**
+ * Steam rewrites its config files when it exits, so they can only be edited while it's closed.
+ * Closes Steam (Desktop Mode only) and returns whether it was running.
+ */
+async function closeSteam(root) {
+  const procs = await util.runningProcesses();
+  if (!(await launch.status()).steam) return false;
+  if (steamdeck.inGamingMode(procs)) throw new Error('Switch to Desktop Mode first (Steam button → Power → Switch to Desktop). Steam can\'t be restarted from Gaming Mode.');
+  const { cmd, args } = steamCommand(root);
+  require('child_process').spawn(cmd, [...args, '-shutdown'], { detached: true, stdio: 'ignore' }).unref();
+  for (let i = 0; i < 60; i++) {
+    await new Promise(r => setTimeout(r, 500));
+    if (!(await launch.status()).steam) {
+      await new Promise(r => setTimeout(r, 1500)); // let it finish writing its files
+      return true;
+    }
+  }
+  throw new Error('Steam didn\'t close. Close it yourself (Steam menu → Exit) and try again.');
+}
+
+function reopenSteam(root) {
+  const { cmd, args } = steamCommand(root);
+  require('child_process').spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref();
+}
+
+/** A copy of the app icon outside the AppImage/asar, so Steam can show it. */
+function iconFile() {
+  const dest = path.join(appDataDir(), 'icon.png');
+  if (!util.exists(dest)) fs.copyFileSync(path.join(__dirname, '..', 'renderer', 'icon.png'), dest);
+  return dest;
+}
+
+function playWrapperState(c, root) {
+  const wrapper = path.join(c.paths.gameDir, steamdeck.WRAPPER_NAME);
+  const opts = root ? steamdeck.launchOptions(root) : [];
+  return {
+    wrapper: util.exists(wrapper),
+    launchOptionSet: opts.some(o => o.options.includes(steamdeck.WRAPPER_NAME)),
+    accounts: opts.length,
+    flags: steamdeck.flags(c.paths.gameDir),
+  };
+}
+
+handle('deck:status', async () => {
+  const c = ctx();
+  let root = null;
+  try { root = await steamRoot(); } catch {}
+  const { exe } = launchCommand();
+  // One process scan for both questions.
+  const procs = await util.runningProcesses();
+  return {
+    platform: process.platform,
+    isDeck: steamdeck.isSteamDeck(),
+    gamingMode: steamdeck.inGamingMode(procs),
+    steamFound: !!root,
+    steamRunning: launch.PROCS.steam.some(n => procs.has(n)),
+    play: process.platform === 'linux' ? playWrapperState(c, root) : null,
+    // Only a stable file can go in the Steam library (not the dev build or a temp unpack).
+    canAddToSteam: !!(process.env.APPIMAGE || process.env.PORTABLE_EXECUTABLE_FILE || (app.isPackaged && process.platform === 'linux')),
+    inSteam: root ? steamdeck.hasShortcut(root, exe) : false,
+  };
+});
+
+handle('deck:setupPlay', async () => {
+  if (process.platform !== 'linux') throw new Error('The Play-button setup is for the Steam Deck and Linux.');
+  const c = ctx();
+  const root = await steamRoot();
+  const wasRunning = await closeSteam(root);
+  try {
+    const flags = steamdeck.flags(c.paths.gameDir);
+    const wrapper = steamdeck.writeWrapper(c.paths.gameDir, { autoSnapshot: util.exists(path.join(c.paths.gameDir, steamdeck.CONTROL_DIR)) ? flags.autoSnapshot : true, solo: flags.solo });
+    const changed = steamdeck.updateLaunchOptions(root, o => steamdeck.withWrapper(o, wrapper), path.join(c.backups.root, 'steam-config'));
+    return { changed, wrapper };
+  } finally {
+    if (wasRunning) reopenSteam(root);
+  }
+});
+
+handle('deck:undoPlay', async () => {
+  const c = ctx();
+  const root = await steamRoot();
+  const wasRunning = await closeSteam(root);
+  try {
+    const changed = steamdeck.updateLaunchOptions(root, o => steamdeck.withoutWrapper(o), path.join(c.backups.root, 'steam-config'));
+    steamdeck.removeWrapper(c.paths.gameDir);
+    return { changed };
+  } finally {
+    if (wasRunning) reopenSteam(root);
+  }
+});
+
+handle('deck:setFlags', f => {
+  const c = ctx();
+  steamdeck.setFlags(c.paths.gameDir, { autoSnapshot: f.autoSnapshot, solo: f.solo });
+  return steamdeck.flags(c.paths.gameDir);
+});
+
+handle('deck:addToSteam', async () => {
+  const c = ctx();
+  const root = await steamRoot();
+  const { exe } = launchCommand();
+  const wasRunning = await closeSteam(root);
+  try {
+    const added = steamdeck.addShortcut(root, { name: 'STR Companion', exe, startDir: path.dirname(exe), icon: iconFile() }, path.join(c.backups.root, 'steam-config'));
+    return { added };
+  } finally {
+    if (wasRunning) reopenSteam(root);
+  }
+});
+
+// ---------- router port (UPnP) ----------
+function serverPort(c) {
+  const ini = new IniDoc(util.readText(game.strInfo(c.paths).configFile, ''));
+  return Number(ini.get('GameServer', 'uPort')) || 10578;
+}
+handle('upnp:status', async () => ({ port: serverPort(ctx()), ...(await upnp.status(serverPort(ctx()))) }));
+handle('upnp:open', () => upnp.openPort(serverPort(ctx())));
+handle('upnp:close', () => upnp.closePort(serverPort(ctx())));
+
+// ---------- bug report ----------
+handle('report:create', async () => {
+  const c = ctx();
+  const snap = health.snapshot(c.paths);
+  const file = await report.createReport(c.paths, {
+    appVersion: app.getVersion(),
+    snapshot: snap,
+    checks: health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen }),
+    vortexMods: game.vortexMods(c.paths),
+    outDir: app.getPath('desktop'),
+    zipExe: sevenZip().exe,
+  });
+  shell.showItemInFolder(file);
+  return file;
+});
+
+// ---------- self-update ----------
+handle('app:selfUpdate', async () => {
+  const r = await fetchText(`https://api.github.com/repos/${REPO}/releases/latest`, { Accept: 'application/vnd.github+json' });
+  if (r.status !== 200) throw new Error("Couldn't reach GitHub.");
+  const rel = JSON.parse(r.body);
+  const latest = String(rel.tag_name || '').replace(/^v/, '');
+  if (util.compareVersions(latest, app.getVersion()) <= 0) return { upToDate: true };
+  const target = process.env.PORTABLE_EXECUTABLE_FILE || process.env.APPIMAGE;
+  const name = selfupdate.assetFor(process.platform, latest, { portableExe: process.env.PORTABLE_EXECUTABLE_FILE, appImage: process.env.APPIMAGE });
+  if (!name || !target) throw new Error('This copy can\'t update itself — download the new version from the release page.');
+  const asset = (rel.assets || []).find(a => a.name === name);
+  const sumsAsset = (rel.assets || []).find(a => a.name === 'SHA256SUMS.txt');
+  if (!asset || !sumsAsset) throw new Error('The new release is still being built — try again in a few minutes.');
+  const sums = selfupdate.parseSums((await fetchText(sumsAsset.browser_download_url)).body);
+  if (!sums[name]) throw new Error('The release has no checksum for this file.');
+  // Download next to the app, so the final swap is a same-folder rename.
+  const tmp = path.join(path.dirname(target), `.${path.basename(target)}.update`);
+  await download(asset.browser_download_url, tmp, p => send('progress', { id: 'self', p }));
+  if ((await selfupdate.sha256File(tmp)) !== sums[name]) {
+    fs.rmSync(tmp, { force: true });
+    throw new Error('The download didn\'t match its checksum, so it wasn\'t installed.');
+  }
+  if (process.platform === 'win32') {
+    const script = path.join(os.tmpdir(), `strc-update-${Date.now()}.cmd`);
+    fs.writeFileSync(script, selfupdate.windowsSwapScript(tmp, target));
+    require('child_process').spawn('cmd.exe', ['/c', script], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+    setTimeout(() => app.quit(), 300);
+  } else {
+    fs.chmodSync(tmp, 0o755);
+    fs.renameSync(tmp, target);
+    app.relaunch({ execPath: target, args: [] });
+    setTimeout(() => app.exit(0), 300);
+  }
+  return { updating: latest };
+});
+
 // ---------- misc ----------
 handle('shell:openGameDir', () => shell.openPath(ctx().paths.gameDir));
 handle('shell:external', url => {
@@ -864,11 +1082,13 @@ handle('shell:external', url => {
 });
 
 function createWindow() {
+  // Fit small screens (the Steam Deck is 1280x800, minus panels) instead of opening off-screen.
+  const area = screen.getPrimaryDisplay().workAreaSize;
   win = new BrowserWindow({
-    width: 1280,
-    height: 840,
-    minWidth: 980,
-    minHeight: 640,
+    width: Math.min(1280, area.width),
+    height: Math.min(840, area.height),
+    minWidth: Math.min(980, area.width),
+    minHeight: Math.min(600, area.height),
     backgroundColor: '#14120f',
     title: 'STR Companion',
     autoHideMenuBar: true,
@@ -887,6 +1107,8 @@ function createWindow() {
   if (process.env.STRC_SHOTS) captureAllPages(process.env.STRC_SHOTS);
   // Started by a Nexus "Mod Manager Download" click: handle that link once the page is ready.
   win.webContents.once('did-finish-load', () => {
+    const scale = Number(loadSettings().uiScale) || 1;
+    if (scale !== 1) win.webContents.setZoomFactor(scale);
     const first = nxmFromArgv(process.argv);
     const queued = [...(first ? [first] : []), ...pendingNxm];
     pendingNxm = [];
@@ -900,7 +1122,7 @@ function createWindow() {
 
 /** Developer aid: STRC_SHOTS=<dir> saves a screenshot of every page, then quits. */
 function captureAllPages(dir) {
-  const pages = ['dashboard', 'setup', 'play', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'settings'];
+  const pages = ['dashboard', 'setup', 'play', 'deck', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'settings'];
   const wait = ms => new Promise(r => setTimeout(r, ms));
   win.webContents.once('did-finish-load', async () => {
     fs.mkdirSync(dir, { recursive: true });

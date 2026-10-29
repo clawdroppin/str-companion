@@ -83,6 +83,12 @@ async function stopServer() {
   return run('pkill', ['-f', '-i', 'SkyrimTogetherServer']);
 }
 
+/** Opens a steam:// link (e.g. steam://rungameid/489830 to press Play). */
+function openSteamUrl(url) {
+  if (IS_WIN) spawn('cmd', ['/c', 'start', '', url], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  else spawnDetached(which('xdg-open') || 'xdg-open', [url]);
+}
+
 function openSteam() {
   if (IS_WIN) spawn('cmd', ['/c', 'start', '', 'steam://open/main'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   else spawnDetached(which('xdg-open') || 'xdg-open', ['steam://open/main']);
@@ -104,4 +110,4 @@ async function setSteamAutoUpdate(paths, value) {
   fs.writeFileSync(file, next);
 }
 
-module.exports = { status, launchClient, launchServer, stopServer, openSteam, setSteamAutoUpdate, protonLauncher, PROCS };
+module.exports = { status, launchClient, launchServer, stopServer, openSteam, openSteamUrl, setSteamAutoUpdate, protonLauncher, PROCS };

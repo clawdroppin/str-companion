@@ -105,7 +105,7 @@ async function renderNow() {
   clearTimers();
   updateFoot();
   if (!state.valid) return renderWelcome();
-  const pages = { dashboard, setup: setupPage, play, mods, cleanup, config, friends, session, backups, logs, settings };
+  const pages = { dashboard, setup: setupPage, play, deck, mods, cleanup, config, friends, session, backups, logs, settings };
   main().innerHTML = `<div class="empty"><span class="spinner"></span> Loading…</div>`;
   try {
     await pages[state.page]();
@@ -121,7 +121,17 @@ function updateFoot() {
   const a = $('#openGameDir');
   if (a) a.addEventListener('click', () => call('shell:openGameDir'));
   const u = $('#getUpdate');
-  if (u) u.addEventListener('click', () => call('shell:external', state.update.url));
+  if (u) u.addEventListener('click', () => selfUpdate());
+}
+
+/** Updates the app in place (portable exe / AppImage) or opens the release page for other builds. */
+async function selfUpdate() {
+  const up = state.update;
+  if (!up) return;
+  if (!up.canSelfUpdate) return call('shell:external', up.url);
+  if (!await confirmBox(`Update to ${up.latest}?`, 'STR Companion downloads the new version, checks it against the release checksum, and restarts. Your settings and backups stay.', 'Update now')) return;
+  const close = modal('<h2>Updating…</h2><div class="sub"><span class="spinner"></span> Downloading and verifying the new version. The app restarts by itself.</div><div class="progress"><div id="selfProg"></div></div>');
+  try { await api.call('app:selfUpdate'); } catch (e) { close(); toast(e.message, 'err'); }
 }
 
 function renderWelcome() {
@@ -317,8 +327,9 @@ api.on('nxm:incoming', async ({ url, modId, fileId }) => {
 
 // ---------- Play & Server ----------
 async function play() {
-  const [procs, net, prefs] = await Promise.all([call('launch:status'), call('net:info'), call('settings:set', {})]);
+  const [procs, net, prefs, deckState] = await Promise.all([call('launch:status'), call('net:info'), call('settings:set', {}), isLinux() ? call('deck:status').catch(() => null) : null]);
   const st = { ...procs, autoSnapshot: prefs.autoSnapshot };
+  const viaSteamPlay = !!(deckState && deckState.play && deckState.play.launchOptionSet && !deckState.play.flags.solo);
   const pill = (on, label, onText = 'running', offText = 'not running') => `<span class="pill ${on ? 'ok' : ''}">● ${label}: ${on ? onText : offText}</span>`;
   main().innerHTML = head('Play & Server', 'Start your session from here. As host, start the server first, then launch the game and connect to it.') + `
     <div class="hero">
@@ -331,7 +342,8 @@ async function play() {
         </div>
         <div class="row"><button class="btn primary big" id="launch">▶ Launch Skyrim Together</button></div>
         <label class="row sub" style="cursor:pointer"><span class="switch"><input type="checkbox" id="autoSnap" ${st.autoSnapshot ? 'checked' : ''}><span></span></span>Snapshot my saves before every launch</label>
-        ${isLinux() && state.protonLauncher === false ? `<div class="callout"><b>protontricks is needed on Linux</b> to start Skyrim Together inside Skyrim's Proton prefix. Install it from your distro or Flathub (<span class="mono">com.github.Matoking.protontricks</span>).</div>` : ''}
+        ${viaSteamPlay ? '<div class="callout blue">Launching goes through Steam&#39;s <b>Play</b> button, set up on the <a href="#" id="toDeck">Steam &amp; Deck</a> page.</div>' : ''}
+        ${isLinux() && !viaSteamPlay && state.protonLauncher === false ? `<div class="callout"><b>Easiest on Linux:</b> set up Steam's Play button on the <a href="#" id="toDeck">Steam &amp; Deck</a> page. Or install <b>protontricks</b> to start Skyrim Together inside Skyrim's Proton prefix. Install it from your distro or Flathub (<span class="mono">com.github.Matoking.protontricks</span>).</div>` : ''}
         <div class="callout blue"><b>Connecting:</b> In game, press <b>F2</b> (or Right-Ctrl) to open the Skyrim Together menu and use <b>Connect</b>. Friends enter your IP and port plus the join password.</div>
       </div>
       <div class="card">
@@ -353,6 +365,11 @@ async function play() {
         3. ${isLinux() ? 'If you run a firewall (ufw, firewalld), allow that UDP port.' : 'Allow <b>SkyrimTogetherServer.exe</b> through Windows Firewall when it asks.'}<br>
         4. Everyone must have the same mods — compare setup codes on the <a href="#" id="toFriends">Friends Sync</a> page.
       </div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <div class="card-head"><div><h2>Router</h2><div class="sub">Friends outside your home reach your server through your router. STR Companion can check it and open the port for you (UPnP).</div></div>
+        <button class="btn" id="checkRouter">Check my router</button></div>
+      <div id="routerResult"></div>
     </div>`;
   // A second copy of the game would just fail, so the button waits until Skyrim closes.
   const setLaunchState = s => {
@@ -368,6 +385,25 @@ async function play() {
   $('#showIp').addEventListener('click', async () => { publicIp = await call('net:publicIp'); ipLine(); });
   $('#copyIp').addEventListener('click', async () => { if (!publicIp) publicIp = await call('net:publicIp'); ipLine(); copy(`${publicIp}:${port}`); });
   $('#toFriends').addEventListener('click', e => { e.preventDefault(); go('friends'); });
+  main().querySelectorAll('#toDeck').forEach(a => a.addEventListener('click', e => { e.preventDefault(); go('deck'); }));
+  const showRouter = async btn => {
+    busy(btn, true, 'Asking the router…');
+    try {
+      const r = await call('upnp:status');
+      const el = $('#routerResult');
+      if (!el) return;
+      if (!r.router) {
+        el.innerHTML = '<div class="callout">No router answered. UPnP may be switched off in your router&#39;s settings — turn it on, or forward the port by hand (UDP <b>' + r.port + '</b> to <span class="mono">' + esc(net.local[0] || 'this PC') + '</span>). Or skip port forwarding entirely with Tailscale or ZeroTier.</div>';
+        return;
+      }
+      const wan = { cgnat: '<div class="callout"><b>Your internet provider uses CGNAT</b> (your router&#39;s address ' + esc(r.wanIp) + ' is shared with other customers). Port forwarding can&#39;t work, so friends can&#39;t reach a server on this PC. Use <b>Tailscale</b> or <b>ZeroTier</b> and share that address instead, or let a friend host.</div>', 'double-nat': '<div class="callout"><b>There are two routers in a row</b> (yours reports ' + esc(r.wanIp) + '). Open the port on both, or put the first one in bridge mode — or use Tailscale/ZeroTier.</div>', public: '', unknown: '' }[r.wan] || '';
+      el.innerHTML = wan + '<div class="check ' + (r.mapped ? 'ok' : 'warn') + '" style="margin-top:8px"><div class="dot">' + (r.mapped ? '✓' : '!') + '</div><div><div class="t">' + (r.mapped ? 'Port ' + r.port + ' (UDP) is open to this PC' : 'Port ' + r.port + ' (UDP) is not forwarded') + '</div><div class="d">Router ' + esc(r.routerIp) + ' · this PC ' + esc(r.localIp || '?') + (r.wanIp ? ' · internet address ' + esc(r.wanIp) : '') + '</div></div><div>' + (r.mapped ? '<button class="btn small" id="closePort">Close it</button>' : '<button class="btn small primary" id="openPort">Open it</button>') + '</div></div>';
+      const op = $('#openPort'), cp = $('#closePort');
+      if (op) op.addEventListener('click', async () => { busy(op, true); try { await call('upnp:open'); toast('Port opened on your router', 'ok'); } catch { /* toast shown */ } showRouter($('#checkRouter')); });
+      if (cp) cp.addEventListener('click', async () => { busy(cp, true); try { await call('upnp:close'); toast('Port closed', 'ok'); } catch { /* toast shown */ } showRouter($('#checkRouter')); });
+    } catch { /* toast shown */ } finally { busy(btn, false); }
+  };
+  $('#checkRouter').addEventListener('click', e => showRouter(e.currentTarget));
   $('#launch').addEventListener('click', async e => {
     busy(e.currentTarget, true, $('#autoSnap').checked ? 'Snapshotting saves…' : 'Launching…');
     try {
@@ -388,9 +424,13 @@ async function play() {
     await call('launch:stopServer'); toast('Server stopped'); setTimeout(render, 1500);
   });
 
+  let lastProcs = st;
   // One poll for both the status pills and the player list, so the process list is read once per tick.
   const refresh = async () => {
-    const [s, procs] = await Promise.all([api.call('server:session').catch(() => null), api.call('launch:status').catch(() => null)]);
+    const [s, fresh] = await Promise.all([api.call('server:session').catch(() => null), api.call('launch:status').catch(() => null)]);
+    // A failed check keeps the last known state instead of flashing "offline".
+    const procs = fresh || lastProcs;
+    lastProcs = procs;
     if (!$('#procStatus')) return;
     if (procs) {
       $('#procStatus').innerHTML = `${pill(procs.steam, 'Steam')} ${pill(procs.client || procs.game, 'Skyrim')} ${pill(procs.server, 'Server')} ${procs.vortex ? '<span class="pill warn">Vortex is open — avoid deploying while playing</span>' : ''}`;
@@ -414,6 +454,62 @@ async function play() {
   };
   renderSession(await api.call('server:session').catch(() => null), st);
   state.timers.push(setInterval(refresh, 4000));
+}
+
+// ---------- Steam & Deck ----------
+async function deck() {
+  const d = await call('deck:status');
+  const linux = d.platform === 'linux';
+  const row = (ok, title, detail, action = '') => `
+    <div class="check ${ok === true ? 'ok' : ok === false ? 'warn' : 'info'}">
+      <div class="dot">${ok === true ? '✓' : ok === false ? '!' : 'i'}</div>
+      <div><div class="t">${title}</div><div class="d">${detail}</div></div><div>${action}</div></div>`;
+  const p = d.play;
+  const playReady = p && p.wrapper && p.launchOptionSet;
+
+  main().innerHTML = head('Steam & Deck', linux
+    ? 'Make Steam\'s own <b>Play</b> button start Skyrim Together — in Gaming Mode too — and open STR Companion from your Steam library.'
+    : 'Add STR Companion to your Steam library. The Play-button automation is for the Steam Deck and Linux; on Windows, launch from Play & Server.') + `
+    ${d.gamingMode ? '<div class="callout" style="margin-bottom:14px"><b>You\'re in Gaming Mode.</b> Everything here works, but changing Steam\'s settings needs Desktop Mode (Steam button → Power → Switch to Desktop), because Steam has to close for a moment.</div>' : ''}
+    ${linux ? `<div class="card">
+      <div class="card-head"><div><h2>Press Play → co-op</h2><div class="sub">A small launch script goes next to SkyrimSE.exe, and Steam's launch options for Skyrim start it before the game. When you press Play it swaps Skyrim's normal launcher for Skyrim Together, which Proton runs like any Windows program. Your own launch options are kept.</div></div>
+        <div class="row">${playReady ? '<button class="btn" id="undoPlay">Undo</button>' : `<button class="btn primary" id="setupPlay" ${d.steamFound ? '' : 'disabled'}>Set up Play button</button>`}</div></div>
+      <div class="checks">
+        ${row(d.isDeck ? true : null, d.isDeck ? 'Steam Deck detected' : 'Linux PC', d.isDeck ? 'Big buttons and the 1280×800 screen are supported — adjust the size in Settings.' : 'Works the same on any Linux PC with Steam.')}
+        ${row(d.steamFound, d.steamFound ? 'Steam found' : 'Steam not found', d.steamFound ? (d.steamRunning ? 'Steam is running — it closes for a moment while its settings change, then reopens.' : 'Steam is closed.') : 'Install Steam, or start it once so it creates its folders.')}
+        ${row(!!(p && p.wrapper), 'Launch script', p && p.wrapper ? 'Installed next to SkyrimSE.exe.' : 'Not installed yet.')}
+        ${row(!!(p && p.launchOptionSet), 'Skyrim\'s launch options', p && p.launchOptionSet ? `Set for ${p.accounts} Steam account${p.accounts === 1 ? '' : 's'}.` : 'Not set yet.')}
+      </div>
+      ${playReady ? `<h3>When you press Play</h3>
+        <label class="row" style="cursor:pointer;margin-bottom:10px"><span class="switch"><input type="checkbox" id="flagSnap" ${p.flags.autoSnapshot ? 'checked' : ''}><span></span></span><span><b>Snapshot my saves first</b><br><span class="sub">Same snapshots as on the Backups page; old automatic ones are pruned when you next open the app.</span></span></label>
+        <label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="flagSolo" ${p.flags.solo ? 'checked' : ''}><span></span></span><span><b>Play solo (start normal Skyrim)</b><br><span class="sub">Play passes straight through to the normal launcher. Switch it off again for co-op — no Steam restart needed.</span></span></label>` : ''}
+    </div>` : ''}
+    <div class="card">
+      <div class="card-head"><div><h2>Open STR Companion from Steam</h2><div class="sub">Adds this app to your Steam library as a non-Steam game${linux ? ', so you can open it in Gaming Mode to check your setup, sync with friends or start the server' : ''}.</div></div>
+        <div class="row">${d.inSteam ? '<span class="pill ok">✓ In your Steam library</span>' : `<button class="btn primary" id="addToSteam" ${d.canAddToSteam && d.steamFound ? '' : 'disabled'}>Add to Steam</button>`}</div></div>
+      ${!d.canAddToSteam ? '<div class="sub">Only the downloaded app can be added (the AppImage on Linux, the portable .exe on Windows).</div>' : ''}
+    </div>
+    ${linux ? `<div class="card"><h2>Steam Deck tips</h2><div class="sub">
+      • In Gaming Mode, <b>STEAM + X</b> opens the on-screen keyboard (for Skyrim Together's connect box and console).<br>
+      • Skyrim Together's menu opens with <b>F2</b> or <b>Right Ctrl</b> — bind one to a back button (L4/R4) in Skyrim's controller layout.<br>
+      • If Skyrim won't start: Skyrim → ⚙ Properties → Compatibility → try <b>Proton Experimental</b>. Turn on <b>Play solo</b> to check that normal Skyrim starts.<br>
+      • Updating STR Companion: the sidebar shows when a new version is out, and it can update itself.</div></div>` : ''}`;
+
+  const steamChange = async (btn, channel, doneMsg) => {
+    if (d.steamRunning && !await confirmBox('Steam will close for a moment', 'Steam rewrites its settings when it exits, so it has to close while they change. It reopens right after. Close any running games first.', 'Continue')) return;
+    busy(btn, true, 'Working…');
+    try { const r = await call(channel); toast(doneMsg(r), 'ok'); } catch { /* toast shown */ }
+    render();
+  };
+  if ($('#setupPlay')) $('#setupPlay').addEventListener('click', e => steamChange(e.currentTarget, 'deck:setupPlay', r => `Play button set up${r.changed ? ` for ${r.changed} account${r.changed === 1 ? '' : 's'}` : ''} — press Play on Skyrim to start co-op`));
+  if ($('#undoPlay')) $('#undoPlay').addEventListener('click', async e => {
+    if (!await confirmBox('Undo the Play-button setup?', 'Removes the launch script and its launch option. Skyrim\'s Play button starts normal Skyrim again.', 'Undo')) return;
+    steamChange(e.currentTarget, 'deck:undoPlay', () => 'Play button back to normal');
+  });
+  if ($('#addToSteam')) $('#addToSteam').addEventListener('click', e => steamChange(e.currentTarget, 'deck:addToSteam', r => r.added ? 'Added to your Steam library' : 'Already in your Steam library'));
+  const flagsFrom = () => ({ autoSnapshot: $('#flagSnap').checked, solo: $('#flagSolo').checked });
+  if ($('#flagSnap')) $('#flagSnap').addEventListener('change', async () => { await call('deck:setFlags', flagsFrom()); toast('Saved', 'ok'); });
+  if ($('#flagSolo')) $('#flagSolo').addEventListener('change', async e => { await call('deck:setFlags', flagsFrom()); toast(e.target.checked ? 'Play now starts normal Skyrim' : 'Play now starts Skyrim Together', 'ok'); });
 }
 
 // ---------- Mods ----------
@@ -534,6 +630,7 @@ async function manualDownload(m) {
 
 // Premium downloads report progress; show it on the mod's Install button.
 api.on('progress', ({ id, p }) => {
+  if (id === 'self') { const bar = document.getElementById('selfProg'); if (bar) bar.style.width = `${Math.round(p * 100)}%`; return; }
   const b = document.querySelector(`[data-act="install"][data-id="${Number(id)}"]`);
   if (b && b.disabled) b.innerHTML = `<span class="spinner"></span> Downloading ${Math.round(p * 100)}%`;
 });
@@ -924,6 +1021,12 @@ async function backups() {
         <label class="row" style="cursor:pointer"><span class="switch"><input type="checkbox" id="autoSnap" ${prefs.autoSnapshot ? 'checked' : ''}><span></span></span>Snapshot automatically before every launch</label>
         <span class="spacer"></span>Keep the newest <input type="number" id="keepAuto" min="1" max="100" value="${Number(prefs.keepAutoSnapshots) || 10}" style="width:70px"> automatic ones (yours are never removed)
       </div>
+      <div class="row sub" style="margin-bottom:12px">
+        <span>Extra copy of every snapshot: ${prefs.extraBackupDir ? `<span class="mono">${esc(prefs.extraBackupDir)}</span>` : '<i>off</i>'}</span>
+        <span class="spacer"></span>
+        <button class="btn small" id="pickExtra">${prefs.extraBackupDir ? 'Change…' : 'Choose a folder…'}</button>
+        ${prefs.extraBackupDir ? '<button class="btn small ghost" id="clearExtra">Turn off</button>' : ''}
+      </div>
       ${snaps.length ? `<div class="table-wrap"><table><thead><tr><th>Taken</th><th>Files</th><th>Size</th><th>Note</th><th></th></tr></thead><tbody>
         ${snaps.map((s, i) => `<tr><td>${fmtDate(s.createdAt)} ${s.auto ? '<span class="pill">auto</span>' : ''}</td><td class="sub">${s.files}</td><td class="sub">${fmtSize(s.size)}</td><td class="sub">${esc(s.note || '')}</td>
           <td style="text-align:right;white-space:nowrap"><button class="btn small" data-snap="${i}">Restore</button> <button class="btn small ghost" data-delsnap="${i}" title="Delete this snapshot">✕</button></td></tr>`).join('')}
@@ -939,6 +1042,11 @@ async function backups() {
   $('#openB').addEventListener('click', () => call('backups:open'));
   $('#openSaves').addEventListener('click', () => call('saves:open'));
   $('#autoSnap').addEventListener('change', e => call('settings:set', { autoSnapshot: e.target.checked }));
+  $('#pickExtra').addEventListener('click', async () => {
+    const dir = await call('settings:pickBackupDir');
+    if (dir) { toast('Every new snapshot is now also copied there', 'ok'); render(); }
+  });
+  if ($('#clearExtra')) $('#clearExtra').addEventListener('click', async () => { await call('settings:set', { extraBackupDir: null }); render(); });
   $('#keepAuto').addEventListener('change', async e => {
     const r = await call('settings:set', { keepAutoSnapshots: e.target.value });
     e.target.value = r.keepAutoSnapshots;
@@ -998,12 +1106,15 @@ async function logs() {
   const tabs = `<div class="tabs" id="logTabs">
       <button data-tab="crashes" class="${logTab === 'crashes' ? 'active' : ''}">Crash reports</button>
       ${files.map(f => `<button data-tab="${f.id}" class="${f.id === logTab ? 'active' : ''}">${esc(f.title)}${f.exists ? '' : ' <span class="pill">none</span>'}</button>`).join('')}</div>`;
-  const bindTabs = () => $('#logTabs').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { logTab = b.dataset.tab; render(); }));
+  const bindTabs = () => {
+    $('#logTabs').querySelectorAll('button').forEach(b => b.addEventListener('click', () => { logTab = b.dataset.tab; render(); }));
+    $('#bugReport').addEventListener('click', e => createBugReport(e.currentTarget));
+  };
 
   if (logTab === 'crashes') {
     const c = await call('logs:crashes');
     main().innerHTML = head('Logs', 'Crash reports are summarized here: the error, and the mods that show up most in the crash. A mod being mentioned is a lead, not proof — but it\'s where to start.',
-      `<button class="btn" id="refresh">↻ Refresh</button><button class="btn" id="ack">Mark all as seen</button>`) + tabs +
+      `<button class="btn" id="bugReport">🐞 Create bug report</button><button class="btn" id="refresh">↻ Refresh</button><button class="btn" id="ack">Mark all as seen</button>`) + tabs +
       (c.reports.length ? c.reports.map((r, i) => `<div class="card">
         <div class="card-head"><div><h2>${fmtDate(r.at)} ${!c.ack || r.at > c.ack ? '<span class="pill warn">new</span>' : ''}</h2>
           <div class="sub mono">${esc(r.name)} · ${esc(r.source)}</div></div>
@@ -1023,7 +1134,7 @@ async function logs() {
 
   const cur = files.find(f => f.id === logTab) || files[0];
   const text = cur.exists ? await call('logs:tail', cur.id) : '';
-  main().innerHTML = head('Logs', 'The last 300 lines of each log. Useful when something doesn\'t load or a friend can\'t connect.', `<button class="btn" id="refresh">↻ Refresh</button><button class="btn" id="openLog" ${cur.exists ? '' : 'disabled'}>Open in editor</button>`) + tabs + `
+  main().innerHTML = head('Logs', 'The last 300 lines of each log. Useful when something doesn\'t load or a friend can\'t connect.', `<button class="btn" id="bugReport">🐞 Create bug report</button><button class="btn" id="refresh">↻ Refresh</button><button class="btn" id="openLog" ${cur.exists ? '' : 'disabled'}>Open in editor</button>`) + tabs + `
     <div class="sub" style="margin-bottom:8px">${cur.exists ? `${esc(cur.file)} · updated ${fmtDate(cur.updatedAt)}` : 'This log doesn\'t exist yet — it appears after the game or server runs.'}</div>
     <pre class="log" id="logText">${esc(text)}</pre>`;
   const pre = $('#logText');
@@ -1033,10 +1144,18 @@ async function logs() {
   $('#openLog').addEventListener('click', () => call('logs:open', cur.id));
 }
 
+/** One zip with logs, crash reports and diagnostics (passwords removed), saved to the Desktop. */
+async function createBugReport(btn) {
+  busy(btn, true, 'Collecting…');
+  try {
+    const file = await call('report:create');
+    toast(`Bug report saved: ${file.split(/[\/]/).pop()} (on your Desktop). Passwords are removed.`, 'ok');
+  } catch { /* toast shown */ } finally { busy(btn, false); }
+}
+
 // ---------- Settings ----------
 async function settings() {
-  const init = await call('app:init');
-  const nexus = await call('nexus:status');
+  const [init, nexus, prefs] = await Promise.all([call('app:init'), call('nexus:status'), call('settings:set', {})]);
   main().innerHTML = head('Settings', '') + `
     <div class="card">
       <h2>Skyrim folder</h2>
@@ -1058,6 +1177,18 @@ async function settings() {
       </div>
     </div>
     <div class="card">
+      <h2>Display</h2>
+      <div class="row" style="margin-top:8px"><span class="sub">Size of everything</span>
+        <input type="range" id="uiScale" min="0.8" max="1.5" step="0.05" value="${Number(prefs.uiScale) || 1}" style="flex:1;accent-color:var(--gold)" aria-label="Interface size">
+        <span class="mono" id="uiScaleVal">${Math.round((Number(prefs.uiScale) || 1) * 100)}%</span></div>
+      <div class="sub" style="margin-top:6px">Bigger for the Steam Deck's screen or a TV, smaller to fit more at once.</div>
+    </div>
+    <div class="card">
+      <h2>Help</h2>
+      <div class="row" style="margin-top:8px"><button class="btn" id="bugReport">🐞 Create bug report</button>
+        <span class="sub">A zip with logs, crash reports and diagnostics on your Desktop — passwords removed — to send to whoever helps you.</span></div>
+    </div>
+    <div class="card">
       <h2>About</h2>
       <div class="sub">STR Companion ${esc(init.version)} — an unofficial helper for Skyrim Together Reborn. Not affiliated with the Tilted Phoques team, Bethesda or Nexus Mods.</div>
     </div>`;
@@ -1066,6 +1197,9 @@ async function settings() {
     if (dir) { state.gameDir = dir; toast('Game folder updated', 'ok'); render(); }
   });
   $('#getKey').addEventListener('click', () => call('nexus:openKeyPage'));
+  $('#uiScale').addEventListener('input', e => { $('#uiScaleVal').textContent = `${Math.round(e.target.value * 100)}%`; });
+  $('#uiScale').addEventListener('change', e => call('settings:set', { uiScale: Number(e.target.value) }));
+  $('#bugReport').addEventListener('click', e => createBugReport(e.currentTarget));
   $('#saveKey').addEventListener('click', async e => {
     busy(e.currentTarget, true, 'Checking…');
     try {

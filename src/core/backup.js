@@ -148,7 +148,7 @@ class BackupStore {
    * Copies the whole Saves folder (never moves it). Async so a big Saves folder doesn't freeze the app.
    * `auto` snapshots (taken before each launch) are pruned to the newest `keepAuto`; manual ones are kept.
    */
-  async snapshotSaves(note = '', { auto = false, keepAuto = 10 } = {}) {
+  async snapshotSaves(note = '', { auto = false, keepAuto = 10, mirrorDir = null } = {}) {
     const files = walkFiles(this.paths.saves);
     if (!files.length) throw new Error('No saves found yet.');
     const id = `${timestampId()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -162,7 +162,18 @@ class BackupStore {
     }
     writeJson(path.join(dir, 'snapshot.json'), { note, auto, createdAt: new Date().toISOString(), files: files.length, size });
     const pruned = auto ? this.pruneAutoSnapshots(keepAuto) : 0;
-    return { id, files: files.length, size, pruned };
+    // A second copy somewhere else (SD card, USB stick, synced cloud folder). Failing here never
+    // loses the main snapshot, so it's reported rather than thrown.
+    let mirrored = null;
+    if (mirrorDir) {
+      try {
+        await fs.promises.cp(dir, path.join(mirrorDir, 'STR-Companion-saves', id), { recursive: true });
+        mirrored = true;
+      } catch (e) {
+        mirrored = e.message;
+      }
+    }
+    return { id, files: files.length, size, pruned, mirrored };
   }
 
   listSaveSnapshots() {

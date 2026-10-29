@@ -612,3 +612,135 @@ test('installing a FOMOD archive puts the chosen files in Data', async () => {
   assert.ok(!fs.existsSync(path.join(paths.dataDir, 'fomod')));
   assert.ok(res.choices.length >= 1);
 });
+
+// ---------- 1.4.0: Steam & Deck, router, bug report, self-update ----------
+
+const vdf = require('../src/core/vdf');
+const steamdeck = require('../src/core/steamdeck');
+
+function fakeSteam(root) {
+  const steam = path.join(root, 'Steam');
+  const cfg = path.join(steam, 'userdata', '12345', 'config');
+  fs.mkdirSync(cfg, { recursive: true });
+  fs.mkdirSync(path.join(steam, 'userdata', '0', 'config'), { recursive: true });
+  fs.writeFileSync(path.join(cfg, 'localconfig.vdf'), [
+    '"UserLocalConfigStore"', '{', '\t"Software"', '\t{', '\t\t"Valve"', '\t\t{', '\t\t\t"Steam"', '\t\t\t{',
+    '\t\t\t\t"apps"', '\t\t\t\t{', '\t\t\t\t\t"489830"', '\t\t\t\t\t{', '\t\t\t\t\t\t"LastPlayed"\t\t"1700000000"',
+    '\t\t\t\t\t\t"LaunchOptions"\t\t"gamemoderun %command% -skipintro"', '\t\t\t\t\t}', '\t\t\t\t}', '\t\t\t}', '\t\t}', '\t}',
+    '\t"friends"', '\t{', '\t\t"name"\t\t"Me \\"quoted\\""', '\t}', '}', '',
+  ].join('\n'));
+  return { steam, cfg };
+}
+
+test('text VDF round-trips and keeps escapes', () => {
+  const { cfg } = fakeSteam(fs.mkdtempSync(path.join(os.tmpdir(), 'strc-vdf-')));
+  const o = vdf.parseText(fs.readFileSync(path.join(cfg, 'localconfig.vdf'), 'utf8'));
+  assert.strictEqual(o.UserLocalConfigStore.friends.name, 'Me "quoted"');
+  assert.deepStrictEqual(vdf.parseText(vdf.stringifyText(o)), o);
+  assert.strictEqual(vdf.child(o.UserLocalConfigStore, 'software').Valve.Steam.apps['489830'].LastPlayed, '1700000000');
+});
+
+test('binary VDF round-trips and shortcut ids match Steam', () => {
+  const data = { shortcuts: { 0: { appid: -123, AppName: 'X', Exe: '"/a/b"', IsHidden: 0, tags: { 0: 'Co-op' } } } };
+  assert.deepStrictEqual(vdf.parseBinary(vdf.stringifyBinary(data)), data);
+  assert.strictEqual(vdf.crc32(Buffer.from('123456789')), 0xcbf43926, 'standard CRC-32 check value');
+  assert.ok(vdf.shortcutAppId('"/x"', 'Y') < 0, 'top bit set, stored as int32');
+});
+
+test('launch wrapper is added in front of %command% and removed cleanly', () => {
+  const w = '/home/deck/.local/share/Steam/steamapps/common/Skyrim Special Edition/strc-launch.sh';
+  assert.strictEqual(steamdeck.withWrapper('', w), `"${w}" %command%`);
+  assert.strictEqual(steamdeck.withWrapper('gamemoderun %command% -skipintro', w), `gamemoderun "${w}" %command% -skipintro`);
+  assert.strictEqual(steamdeck.withWrapper('-skipintro', w), `"${w}" %command% -skipintro`);
+  assert.strictEqual(steamdeck.withWrapper(steamdeck.withWrapper('-x', w), w), `"${w}" %command% -x`, 'idempotent');
+  assert.strictEqual(steamdeck.withoutWrapper(`gamemoderun "${w}" %command% -skipintro`), 'gamemoderun %command% -skipintro');
+  assert.strictEqual(steamdeck.withoutWrapper(`"${w}" %command%`), '');
+});
+
+test('launch options and Steam library entries are written for every account, with backups', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'strc-steam-'));
+  const { steam, cfg } = fakeSteam(root);
+  const backups = path.join(root, 'bk');
+  const w = '/games/Skyrim Special Edition/strc-launch.sh';
+  assert.strictEqual(steamdeck.updateLaunchOptions(steam, o => steamdeck.withWrapper(o, w), backups), 1);
+  assert.deepStrictEqual(steamdeck.launchOptions(steam), [{ user: '12345', options: `gamemoderun "${w}" %command% -skipintro` }]);
+  assert.strictEqual(fs.readdirSync(backups).length, 1);
+  assert.strictEqual(steamdeck.updateLaunchOptions(steam, o => steamdeck.withWrapper(o, w), backups), 0, 'no change, no write');
+  steamdeck.updateLaunchOptions(steam, o => steamdeck.withoutWrapper(o), backups);
+  assert.strictEqual(steamdeck.launchOptions(steam)[0].options, 'gamemoderun %command% -skipintro');
+
+  const exe = '/home/deck/Applications/STR-Companion/STR-Companion.AppImage';
+  assert.strictEqual(steamdeck.addShortcut(steam, { name: 'STR Companion', exe, startDir: path.dirname(exe) }, backups), 1);
+  assert.strictEqual(steamdeck.addShortcut(steam, { name: 'STR Companion', exe, startDir: path.dirname(exe) }, backups), 0, 'not added twice');
+  assert.ok(steamdeck.hasShortcut(steam, exe));
+  const sc = vdf.parseBinary(fs.readFileSync(path.join(cfg, 'shortcuts.vdf')));
+  assert.strictEqual(sc.shortcuts['0'].AppName, 'STR Companion');
+  assert.strictEqual(sc.shortcuts['0'].appid, vdf.shortcutAppId(`"${exe}"`, 'STR Companion'));
+});
+
+test('the Play wrapper swaps the launcher, snapshots saves and passes through in solo mode', { skip: process.platform === 'win32' }, async () => {
+  const { paths } = fakeGame({ proton: true });
+  const wrapper = steamdeck.writeWrapper(paths.gameDir, { autoSnapshot: true, solo: false });
+  const launcher = path.join(paths.gameDir, 'SkyrimSELauncher.exe');
+  let r = await run('sh', [wrapper, 'echo', 'proton', 'waitforexitandrun', launcher]);
+  assert.strictEqual(r.stdout.trim(), `proton waitforexitandrun ${path.join(paths.gameDir, 'Data/SkyrimTogetherReborn/SkyrimTogether.exe')}`);
+  const snaps = new BackupStore(paths).listSaveSnapshots();
+  assert.strictEqual(snaps.length, 1);
+  assert.strictEqual(snaps[0].auto, true);
+  assert.ok(snaps[0].files >= 1);
+  steamdeck.setFlags(paths.gameDir, { solo: true });
+  r = await run('sh', [wrapper, 'echo', launcher]);
+  assert.strictEqual(r.stdout.trim(), launcher);
+  steamdeck.removeWrapper(paths.gameDir);
+  assert.ok(!fs.existsSync(wrapper));
+});
+
+test('router replies and WAN addresses are understood', () => {
+  const upnp = require('../src/core/upnp');
+  assert.strictEqual(upnp.parseSsdp('HTTP/1.1 200 OK\r\nLOCATION: http://192.168.1.1:5000/rootDesc.xml\r\nST: x\r\n').location, 'http://192.168.1.1:5000/rootDesc.xml');
+  const xml = `<root><URLBase>http://192.168.1.1:5000</URLBase><device><deviceList><device><deviceList><device><serviceList>
+    <service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/ctl/IPConn</controlURL></service>
+    </serviceList></device></deviceList></device></deviceList></device></root>`;
+  assert.deepStrictEqual(upnp.findControlUrl(xml, 'http://192.168.1.1:5000/rootDesc.xml'),
+    { url: 'http://192.168.1.1:5000/ctl/IPConn', serviceType: 'urn:schemas-upnp-org:service:WANIPConnection:1' });
+  assert.strictEqual(upnp.classifyWanIp('100.72.1.5'), 'cgnat');
+  assert.strictEqual(upnp.classifyWanIp('192.168.0.2'), 'double-nat');
+  assert.strictEqual(upnp.classifyWanIp('84.10.20.30'), 'public');
+  assert.strictEqual(upnp.classifyWanIp(''), 'unknown');
+});
+
+test('bug reports remove passwords and include logs', async () => {
+  const report = require('../src/core/report');
+  const clean = report.sanitizeIni('[GameServer]\r\nsPassword=hunter2\r\nsAdminPassword=root\r\nuPort=10578\r\n');
+  assert.doesNotMatch(clean, /hunter2|root/);
+  assert.match(clean, /uPort=10578/);
+  const { root, paths } = fakeGame();
+  fs.writeFileSync(path.join(paths.strDir, 'config', 'STServer.ini'), '[GameServer]\r\nsPassword=secret123\r\n');
+  const snap = health.snapshot(paths);
+  const file = await report.createReport(paths, { appVersion: '1.4.0', snapshot: snap, checks: health.checks(paths, snap, null), vortexMods: [], outDir: path.join(root, 'out'), zipExe: sevenZip().exe });
+  assert.ok(fs.existsSync(file));
+  const list = await run(sevenZip().exe, ['l', file]);
+  assert.match(list.stdout, /diagnostics\.txt/);
+  assert.match(list.stdout, /STServer\.ini/);
+  const x = path.join(root, 'x');
+  await run(sevenZip().exe, ['x', file, `-o${x}`, '-y']);
+  assert.doesNotMatch(fs.readFileSync(path.join(x, 'STServer.ini'), 'utf8'), /secret123/);
+});
+
+test('self-update picks the right file and reads checksums', () => {
+  const su = require('../src/core/selfupdate');
+  assert.strictEqual(su.assetFor('win32', '1.4.0', { portableExe: 'C:/x.exe' }), 'STR-Companion-1.4.0.exe');
+  assert.strictEqual(su.assetFor('linux', '1.4.0', { appImage: '/a.AppImage' }), 'STR-Companion-1.4.0-linux-x86_64.AppImage');
+  assert.strictEqual(su.assetFor('linux', '1.4.0', {}), null, 'tar.gz installs update through the installer');
+  const h = 'a'.repeat(64);
+  assert.deepStrictEqual(su.parseSums(`${h}  STR-Companion-1.4.0.exe\n${'b'.repeat(64)} *other.tar.gz\njunk\n`), { 'STR-Companion-1.4.0.exe': h, 'other.tar.gz': 'b'.repeat(64) });
+  assert.match(su.windowsSwapScript('C:\\a\\new.exe', 'C:\\a\\app.exe'), /move \/y "C:\\a\\new\.exe" "C:\\a\\app\.exe"/);
+});
+
+test('save snapshots can be mirrored to an extra folder', async () => {
+  const { root, paths } = fakeGame();
+  const extra = path.join(root, 'usb');
+  const r = await new BackupStore(paths).snapshotSaves('m', { mirrorDir: extra });
+  assert.strictEqual(r.mirrored, true);
+  assert.ok(fs.existsSync(path.join(extra, 'STR-Companion-saves', r.id, 'Save1.ess')));
+});

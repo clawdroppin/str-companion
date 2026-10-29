@@ -1,8 +1,8 @@
 {
   "name": "str-companion",
   "productName": "STR Companion",
-  "version": "1.3.0",
-  "description": "Setup, cleanup, config and launch companion for Skyrim Together Reborn co-op (Windows and Linux).",
+  "version": "1.4.0",
+  "description": "Setup, cleanup, config and launch companion for Skyrim Together Reborn co-op (Windows, Linux and Steam Deck).",
   "main": "src/main/main.js",
   "private": true,
   "scripts": {

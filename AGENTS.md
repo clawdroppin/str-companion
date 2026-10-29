@@ -30,6 +30,9 @@ Before you finish any change: run `npm test`, then run the `STRC_SHOTS` check an
 - Windows `.exe` files run on Linux through `protontricks-launch --appid 489830` (native or Flatpak). The server may also use a native Linux binary or Wine. See `launch.js`.
 - Guard Windows-only tools (`reg`, `tasklist`, `taskkill`, `cmd`) with `process.platform === 'win32'`.
 - Vortex and MO2 don't exist on Linux, so their code paths must simply find nothing there.
+- **Steam config files** (`localconfig.vdf`, `shortcuts.vdf`) are only written while Steam is closed (`closeSteam` in main.js, refused in Gaming Mode), always backed up to `_STRCompanion_Backup/steam-config/` first, and edited for every account in `userdata/`. The Play wrapper must keep the user's own launch options (`withWrapper`/`withoutWrapper` are idempotent).
+- The wrapper is plain POSIX `sh` (SteamOS has no Node at launch time). Its save snapshots use the app's snapshot format; the app prunes them on start. Test it with the Linux-only wrapper test.
+- Release asset names are fixed (`STR-Companion-SteamDeck.tar.gz`, `install-steamdeck.sh`, `SHA256SUMS.txt`): the installer and self-update download them via `releases/latest/download/…`. CI's `checksums` job writes SHA256SUMS after both builds.
 
 ## Layout
 
@@ -44,6 +47,11 @@ src/core/       Pure Node modules that touch the game. No Electron imports. Unit
   installer.js  archive extraction (7-Zip), layout detection (Data vs game root vs FOMOD), registry
   fomod.js      runs FOMOD installers (ModuleConfig.xml, UTF-8/16) non-interactively with recommended options
   setup.js      Quick Setup: plan from a host's code, exact-version Nexus file picking, nxm:// link parsing
+  vdf.js        Steam's text VDF (localconfig.vdf) and binary VDF (shortcuts.vdf), CRC-32 shortcut ids
+  steamdeck.js  Deck/Gaming Mode detection, the strc-launch.sh Play wrapper, launch options, non-Steam shortcuts
+  upnp.js       router discovery (SSDP), UDP port mapping, CGNAT / double-NAT classification
+  report.js     bug-report zip (passwords stripped by sanitizeIni)
+  selfupdate.js release asset choice, SHA256SUMS parsing, Windows swap script
   configs.js    config file registry, load (with metadata), save, presets
   health.js     snapshot() gathers state; checks() turns it into the dashboard list with fixes
   mods.js       catalog + Vortex + registry merge, Nexus update checks
@@ -55,7 +63,7 @@ src/main/       Electron main process. main.js = IPC handlers (`handle('channel'
 src/renderer/   UI: index.html, styles.css, app.js (vanilla JS, one async function per page)
 data/           catalog.json (mods), config-meta.json (friendly labels/types), presets.json
 test/           core.test.js, fixtures.js (fake installs, also a CLI for CI)
-scripts/        make-icon.js (renders build/icon.png)
+scripts/        make-icon.js (renders build/icon.png), package-deck.sh (CI: Steam Deck tarball), install-steamdeck.sh (release asset: one-line installer)
 build/          packaging resources (icon)
 ```
 

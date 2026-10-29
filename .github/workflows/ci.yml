@@ -69,6 +69,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run dist:linux -- --publish never
+      - name: Package for Steam Deck
+        run: bash scripts/package-deck.sh
+      - name: Check the Deck installer script
+        run: bash -n scripts/install-steamdeck.sh
       - uses: actions/upload-artifact@v4
         with:
           name: linux-build
@@ -79,7 +83,7 @@ jobs:
         if: github.event_name == 'release'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.AppImage dist/*.tar.gz --clobber
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/*.AppImage dist/*.tar.gz scripts/install-steamdeck.sh --clobber
 
   build-windows:
     name: Build Windows (portable exe)
@@ -103,3 +107,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: gh release upload "${{ github.event.release.tag_name }}" dist/STR-Companion-*.exe --clobber
+
+  checksums:
+    name: Release checksums
+    if: github.event_name == 'release'
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: SHA256SUMS.txt for every release file (used by the Deck installer and self-update)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          mkdir assets && cd assets
+          gh release download "$TAG" --repo "${{ github.repository }}" --pattern '*' --skip-existing
+          rm -f SHA256SUMS.txt
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          gh release upload "$TAG" SHA256SUMS.txt --repo "${{ github.repository }}" --clobber

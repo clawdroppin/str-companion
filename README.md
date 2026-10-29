@@ -26,18 +26,38 @@ Get the latest version from **[Releases](https://github.com/clawdroppin/str-comp
 1. Download **`STR-Companion-x.y.z.exe`** and run it.
 2. Windows may show **"Windows protected your PC"** because the app isn't code-signed. Click **More info → Run anyway**.
 
-### 🐧 Linux / Steam Deck
+### 🎮 Steam Deck
+**One line in Konsole (Desktop Mode)** downloads, verifies, installs to `~/Applications/STR-Companion`, adds a menu and desktop entry, and starts the app:
+
+```bash
+curl -fsSL https://github.com/clawdroppin/str-companion/releases/latest/download/install-steamdeck.sh | bash
+```
+
+Or download **[STR-Companion-SteamDeck.tar.gz](https://github.com/clawdroppin/str-companion/releases/latest/download/STR-Companion-SteamDeck.tar.gz)**, extract it, and double-click `STR-Companion.AppImage`.
+
+Then, once, in the app's **Steam & Deck** page (Desktop Mode):
+1. **Set up Play button**. Steam closes and reopens once.
+2. **Add to Steam**, so STR Companion opens from Gaming Mode.
+
+From then on, press **Play** on Skyrim in **Gaming Mode** and Skyrim Together starts, with your saves snapshotted first. **Play solo** switches back to normal Skyrim without touching Steam.
+
+<details>
+<summary>How the Play button works</summary>
+
+STR Companion writes a small script, `strc-launch.sh`, next to `SkyrimSE.exe` and puts it in front of `%command%` in Skyrim's Steam launch options. Your own launch options are kept, and `localconfig.vdf` is backed up first. When Steam starts the game, the script:
+1. copies your saves into a snapshot (when switched on),
+2. starts the normal launcher when *Play solo* is on or Skyrim Together is missing,
+3. otherwise swaps `SkyrimSELauncher.exe` in Steam's command for `Data/SkyrimTogetherReborn/SkyrimTogether.exe`, which Proton runs like any Windows program.
+
+**Undo** removes the script and the launch option again.
+</details>
+
+### 🐧 Other Linux
 Skyrim runs through **Proton**. The app finds the game in your Steam library (native, Flatpak or Snap Steam) and reads saves, `Plugins.txt` and INIs from inside the Proton prefix automatically.
 
-1. Download **`STR-Companion-x.y.z-linux-x86_64.AppImage`**, then:
-   ```bash
-   chmod +x STR-Companion-*.AppImage
-   ./STR-Companion-*.AppImage
-   ```
-   If it won't start on Ubuntu 22.04+, install FUSE 2 (`sudo apt install libfuse2`) or use the `.tar.gz` instead: extract it and run `str-companion`.
-2. To **launch Skyrim Together and the server** from the app, install **[protontricks](https://github.com/Matoking/protontricks)** (from your distro, or Flathub `com.github.Matoking.protontricks`). It starts the Windows programs inside Skyrim's Proton prefix. The server also runs with plain Wine if you have it.
-3. On **Steam Deck**, use Desktop Mode.
-4. Optional: install `7zip` (or `p7zip` with its rar plugin) to install `.rar` mods.
+- Use the Steam Deck installer above, or download **`STR-Companion-x.y.z-linux-x86_64.AppImage`** and `chmod +x` it. If it won't start on Ubuntu 22.04+, install FUSE 2 (`sudo apt install libfuse2`) or use the `.tar.gz`.
+- The **Steam & Deck** page's Play-button setup works on any Linux PC. Without it, the app starts Skyrim Together through **[protontricks](https://github.com/Matoking/protontricks)**.
+- Optional: install `7zip` (or `p7zip` with its rar plugin) to install `.rar` mods.
 
 ### First run
 The app finds Skyrim through Steam. If it doesn't, point it at the folder that contains `SkyrimSE.exe`.
@@ -53,12 +73,16 @@ The app finds Skyrim through Steam. If it doesn't, point it at the folder that c
 | 🩺 **Dashboard** | Health check of your whole setup: game version, SKSE, Address Library, Skyrim Together, **missing master files** (the #1 cause of startup crashes), plugin limits, problem mods, Anniversary Edition content, and Steam auto-updates. It also warns when **Steam updated Skyrim** since your last session, flags **Skyrim Together's plugins being switched off**, and summarizes the **last crash**. Most problems have a **one-click fix**. |
 | ★ **Quick Setup** | For friends on a fresh install: paste the host's setup code and add a Nexus API key. The app installs **every mod at the host's exact version**, runs mod installers (FOMOD) with their recommended options, moves extra Anniversary content aside, matches the load order and applies the co-op game settings. **Premium** Nexus accounts are fully automatic. **Free** accounts click "Slow download" once per mod, because STR Companion handles Nexus's *Mod Manager Download* links. |
 | ▶️ **Play & Server** | Launch Skyrim Together (your saves are **snapshotted automatically first**), start, stop or restart your server, see who's connected live, and **copy a ready-made invite** (address, password and setup code) for your group chat. |
+| 🎮 **Steam & Deck** | **Press Play in Gaming Mode → co-op.** A launch wrapper in Skyrim's Steam launch options starts Skyrim Together under Proton and snapshots your saves first. **Play solo** for normal Skyrim, and **Add to Steam** so the app opens in Gaming Mode. |
 | 🧩 **Mods** | A curated catalog (Required · Stability · Recommended · Visuals · More content), each labeled by Skyrim Together compatibility. **Install, update-check and uninstall** in one place. Add any Nexus mod by link, or install from an archive. For SKSE mods, it shows whether they **actually loaded** on your game version. |
 | 🧹 **Cleanup** | Moves Anniversary Edition add-ons into a backup, **keeping the 4 free ones USSEP needs**. Also flags known-incompatible mods, and lets you switch off or set aside any plugin, with a warning if other mods depend on it. |
 | ⚙️ **Config Editor** | Friendly editors with plain-English descriptions for `STServer.ini`, `SkyrimPrefs.ini`, `Skyrim.ini`, `SkyrimCustom.ini` and Engine Fixes. **One-click presets** include *Story Co-op (3 players)*, *Hardcore*, *Big Group*, *Performance* and *Quality*, and you can save your own. |
 | ⇄ **Friends Sync** | Each player copies a short `STR2-…` setup code. Paste a friend's code to see mismatched game versions, missing plugins and load order differences. **Match the host's load order in one click**, with Nexus links for anything you're missing. Save friends to your **party** and see at a glance who's in sync. |
-| 💾 **Backups** | **Save snapshots**, taken automatically before every launch (old automatic ones are pruned, yours are kept), plus a restorable history of every file the app moved or replaced. Shows disk usage, and lets you delete what you no longer need. |
+| 💾 **Backups** | **Save snapshots**, taken automatically before every launch (old automatic ones are pruned, yours are kept), an optional **extra copy** on an SD card, USB stick or cloud folder, plus a restorable history of every file the app moved or replaced. Shows disk usage, and lets you delete what you no longer need. |
+| 🌐 **Router check** | On Play & Server: finds your router, **opens the server port with UPnP**, and spots **CGNAT** or double NAT, where port forwarding can't work. |
 | ✅ **Session Checklist** | The pre-session routine that keeps quests in sync, plus a stuck-quest helper. |
+| 🐞 **Bug report** | One zip on your Desktop with logs, crash reports, plugin lists and diagnostics. **Passwords are removed.** |
+| ⬆️ **Updates itself** | The sidebar shows new versions; the portable exe and AppImage update in place, SHA-256 verified. |
 | 📜 **Logs** | Server, client, SKSE and Engine Fixes logs in one place, plus a **crash report reader** that names the mods showing up most in each crash (with [Crash Logger](https://www.nexusmods.com/skyrimspecialedition/mods/59818) installed). |
 
 ### 🔒 Safe by design
