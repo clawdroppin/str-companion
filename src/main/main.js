@@ -23,6 +23,7 @@ const steamdeck = require('../core/steamdeck');
 const upnp = require('../core/upnp');
 const report = require('../core/report');
 const selfupdate = require('../core/selfupdate');
+const llm = require('../core/llm');
 const { sevenZip } = require('../core/installer');
 const { IniDoc } = require('../core/ini');
 
@@ -435,6 +436,243 @@ handle('nexus:status', async () => {
   catch (e) { return { configured: true, error: e.message }; }
 });
 handle('nexus:openKeyPage', () => shell.openExternal('https://next.nexusmods.com/settings/api-keys'));
+
+// ---------- local AI assistant ----------
+// A local LLM (LM Studio, Ollama, …) chats with the user and can read the app's state or run the
+// same one-click fixes the dashboard offers. Everything stays on this machine: the only traffic is
+// to the address the user typed, and the tools below are the only things the model can do.
+
+const LLM_DEFAULTS = { baseUrl: 'http://localhost:1234/v1', model: '', temperature: 0.3, maxTokens: 0, systemNote: '' };
+function llmSettings() {
+  const s = loadSettings();
+  return { ...LLM_DEFAULTS, ...(s.llm || {}) };
+}
+function llmCfg() {
+  const s = llmSettings();
+  let apiKey = null;
+  if (s.apiKeyEnc) {
+    try { apiKey = safeStorage.decryptString(Buffer.from(s.apiKeyEnc, 'base64')); } catch {}
+  }
+  return { baseUrl: s.baseUrl, model: s.model, apiKey, temperature: s.temperature, maxTokens: s.maxTokens };
+}
+
+handle('llm:settings', () => {
+  const s = llmSettings();
+  return { baseUrl: s.baseUrl, model: s.model, hasKey: !!s.apiKeyEnc, temperature: s.temperature, maxTokens: s.maxTokens, systemNote: s.systemNote };
+});
+
+handle('llm:save', patch => {
+  const s = { ...llmSettings(), ...patch };
+  if (s.baseUrl) s.baseUrl = llm.normalizeBase(s.baseUrl);
+  s.model = String(s.model || '').trim();
+  s.temperature = Math.max(0, Math.min(2, Number(s.temperature) || 0));
+  s.maxTokens = Math.max(0, Math.min(32768, Number(s.maxTokens) || 0));
+  s.systemNote = String(s.systemNote || '').slice(0, 2000);
+  if (patch.apiKey !== undefined) {
+    const key = String(patch.apiKey || '').trim();
+    if (key) {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error(process.platform === 'win32' ? 'Windows secure storage is unavailable, so the key cannot be saved safely.' : 'No system keyring is available, so the key cannot be saved safely.');
+      s.apiKeyEnc = safeStorage.encryptString(key).toString('base64');
+    } else {
+      s.apiKeyEnc = null;
+    }
+  }
+  updateSettings({ llm: s });
+  return { baseUrl: s.baseUrl, model: s.model, hasKey: !!s.apiKeyEnc, temperature: s.temperature, maxTokens: s.maxTokens, systemNote: s.systemNote };
+});
+
+handle('llm:test', async () => {
+  const models = await llm.listModels(llmCfg());
+  return { models };
+});
+
+/** Compact state the assistant starts with, so even a model without tool support can help. */
+function llmStateBlock(c) {
+  const snap = health.snapshot(c.paths);
+  const checks = health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen, crashAck: c.s.crashAck, clientCrashAck: c.s.clientCrashAck === snap.client.updatedAt });
+  const mods = mods.modList(c.paths, c.installer.registry(), c.s.customMods || [], logs.sksePluginResults(c.paths).results)
+    .filter(m => m.installed || m.category === 'Essentials')
+    .map(m => `${m.name}${m.installed ? ` ${m.installedVersion || ''}`.trim() : ' (not installed)'} [${m.compat}]`);
+  return [
+    `Game: Skyrim ${snap.gameVersion || '?'} · Skyrim Together ${snap.str.version || 'not installed'} · SKSE ${snap.skse.version || 'not installed'} · ${snap.loadOrder.length} plugins loaded · manager: ${snap.manager || 'none'}`,
+    `Health: ${checks.filter(x => x.level === 'error').length} problems, ${checks.filter(x => x.level === 'warn').length} warnings.`,
+    ...checks.filter(x => x.level !== 'ok').slice(0, 12).map(x => `  - [${x.level}] ${x.title}`),
+    `Installed mods: ${mods.length ? mods.slice(0, 40).join(', ') : 'none detected'}`,
+  ].join('\n');
+}
+
+/** The tools the model may call. Reads are free; actions are exactly the dashboard's one-click fixes. */
+function llmTools(c) {
+  const runFix = async args => {
+    const allowed = ['backupCC', 'backupFiles', 'restoreFiles', 'activatePlugins', 'steamUpdateOnLaunch', 'ackVersions'];
+    if (!allowed.includes(args.action)) throw new Error(`Only these fixes can be run: ${allowed.join(', ')}`);
+    switch (args.action) {
+      case 'backupCC': return backupCreationClub(c);
+      case 'backupFiles': return c.backups.backup(args.rels, { label: args.label || 'AI assistant', category: 'known-issue' });
+      case 'restoreFiles': {
+        const byBatch = {};
+        for (const it of args.items || []) (byBatch[it.batch] = byBatch[it.batch] || []).push(it.rel);
+        let restored = 0;
+        for (const [id, rels] of Object.entries(byBatch)) restored += c.backups.restore(id, rels).restored;
+        return { restored };
+      }
+      case 'activatePlugins': {
+        const names = (args.names || []).filter(n => plugins.PLUGIN_RE.test(n));
+        c.backups.snapshotConfig(util.resolveCI(c.paths.localAppDir, 'Plugins.txt'));
+        plugins.addToPluginsTxt(c.paths.localAppDir, names);
+        return { done: true, names };
+      }
+      case 'steamUpdateOnLaunch': await launch.setSteamAutoUpdate(c.paths, 1); return { done: true };
+      case 'ackVersions': updateSettings({ lastSeen: currentVersions(health.snapshot(c.paths)) }); return { done: true };
+    }
+  };
+  return [
+    {
+      name: 'get_health',
+      description: 'Current health check: versions, load order, plugin limits, problems and warnings, each with its one-click fix (action + label).',
+      parameters: { type: 'object', properties: {} },
+      run: () => { const snap = health.snapshot(c.paths); return { snapshot: { gameVersion: snap.gameVersion, str: snap.str, skse: snap.skse, addressLibrary: snap.addressLibrary, pluginCount: snap.loadOrder.length, manager: snap.manager, autoUpdate: snap.autoUpdate }, checks: health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen, crashAck: c.s.crashAck, clientCrashAck: c.s.clientCrashAck === snap.client.updatedAt }) }; },
+    },
+    {
+      name: 'get_mods',
+      description: 'The mod catalog with what is installed, versions, and STR compatibility (safe/likely/test).',
+      parameters: { type: 'object', properties: {} },
+      run: () => ({ mods: mods.modList(c.paths, c.installer.registry(), c.s.customMods || [], logs.sksePluginResults(c.paths).results).map(m => ({ name: m.name, installed: !!m.installed, version: m.installedVersion || null, compat: m.compat, category: m.category, desc: (m.desc || '').slice(0, 120) })) }),
+    },
+    {
+      name: 'get_logs',
+      description: 'Recent server session, Skyrim Together client log problems, SKSE plugin load results, and the latest crash reports.',
+      parameters: { type: 'object', properties: {} },
+      run: () => ({ server: logs.serverSession(c.paths), client: logs.clientLog(c.paths), skse: logs.sksePluginResults(c.paths), crashes: logs.crashReports(c.paths, plugins.effectiveLoadOrder(c.paths.gameDir, c.paths.localAppDir).order.map(p => p.name), 3) }),
+    },
+    {
+      name: 'get_config',
+      description: 'Read one config file: server (STServer.ini), prefs, skyrim, custom, enginefixes or displaytweaks. Returns its current values.',
+      parameters: { type: 'object', properties: { id: { type: 'string', enum: ['server', 'prefs', 'skyrim', 'custom', 'enginefixes', 'displaytweaks'] } }, required: ['id'] },
+      run: args => { const d = configs.load(c.paths, args.id); return { id: args.id, title: d.title, exists: d.exists, values: d.entries.filter(e => !e.missing).map(e => ({ section: e.section, key: e.key, value: e.value, label: e.label })) }; },
+    },
+    {
+      name: 'get_setup',
+      description: 'My setup: player name, versions, full plugin list, and the STR2- setup code to share with friends.',
+      parameters: { type: 'object', properties: {} },
+      run: () => { const m = mySetup(c); return { ...m, code: share.makeCode(m) }; },
+    },
+    {
+      name: 'parse_friend_code',
+      description: 'Decode a friend\'s STR2-/STR1- setup code. Returns their player name, game/STR/SKSE versions, and their full plugin list. Read-only.',
+      parameters: { type: 'object', properties: { code: { type: 'string', description: 'The friend\'s setup code (starts with STR2- or STR1-)' } }, required: ['code'] },
+      run: args => { const t = share.parseCode(args.code); return { playerName: t.playerName, gameVersion: t.gameVersion, strVersion: t.strVersion, skseVersion: t.skseVersion, addressLibrary: t.addressLibrary, pluginCount: t.plugins.length, plugins: t.plugins }; },
+    },
+    {
+      name: 'compare_setups',
+      description: 'Compare my setup against a friend\'s code. Returns the differences (most serious first) and a plan of what it would take to match their load order: missing plugins, ones to activate, ones to deactivate, and whether the order differs. Read-only — changes nothing.',
+      parameters: { type: 'object', properties: { code: { type: 'string', description: 'The friend\'s setup code' } }, required: ['code'] },
+      run: args => {
+        const snap = health.snapshot(c.paths);
+        const mine = mySetup(c, snap);
+        const t = share.parseCode(args.code);
+        return { friend: { playerName: t.playerName, pluginCount: t.plugins.length }, diffs: share.compare(mine, t), plan: share.matchPlan(mine, t, localPlugins(c, snap)) };
+      },
+    },
+    {
+      name: 'match_load_order',
+      description: 'Rewrite my Plugins.txt so my load order matches a friend\'s code (activating, deactivating and reordering plugins that are already on my disk). Skyrim must be closed. Plugins.txt is snapshotted first — nothing is deleted. Plugins the friend has that I don\'t are reported as missing, not downloaded.',
+      parameters: { type: 'object', properties: { code: { type: 'string', description: 'The friend\'s setup code to match' } }, required: ['code'] },
+      run: async args => {
+        const st = await launch.status();
+        if (st.game || st.client) throw new Error('Close Skyrim first — it rewrites Plugins.txt when it exits.');
+        const snap = health.snapshot(c.paths);
+        const t = share.parseCode(args.code);
+        const plan = share.matchPlan(mySetup(c, snap), t, localPlugins(c, snap));
+        const file = util.resolveCI(c.paths.localAppDir, 'Plugins.txt');
+        const snapshot = c.backups.snapshotConfig(file);
+        plugins.applyLoadOrder(c.paths.gameDir, c.paths.localAppDir, plan.order);
+        return { ...plan, snapshot, manager: snap.manager };
+      },
+    },
+    {
+      name: 'set_config',
+      description: 'Change one or more config values, e.g. the server password (id "server", section "GameServer", key "sPassword"). Use get_config first to find the exact section and key. The file is snapshotted first; Skyrim must be closed for the game INIs. Returns how many values changed.',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', enum: ['server', 'prefs', 'skyrim', 'custom', 'enginefixes', 'displaytweaks'] },
+          changes: { type: 'array', items: { type: 'object', properties: { section: { type: 'string' }, key: { type: 'string' }, value: { type: 'string' } }, required: ['section', 'key', 'value'] } },
+        },
+        required: ['id', 'changes'],
+      },
+      run: async args => {
+        await assertGameClosed(args.id);
+        const r = configs.save(c.paths, args.id, args.changes, c.backups);
+        return { ...r, serverRunning: args.id === 'server' ? (await launch.status()).server : false };
+      },
+    },
+    {
+      name: 'run_fix',
+      description: 'Run one of the app\'s safe one-click fixes. backupCC moves Anniversary add-ons to backup; backupFiles moves listed files to backup; restoreFiles restores backed-up files (items from get_health); activatePlugins switches plugins on; steamUpdateOnLaunch sets Steam to update on launch only (Steam must be closed); ackVersions acknowledges a version change. Nothing is ever deleted.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['backupCC', 'backupFiles', 'restoreFiles', 'activatePlugins', 'steamUpdateOnLaunch', 'ackVersions'] },
+          rels: { type: 'array', items: { type: 'string' }, description: 'backupFiles: file paths relative to the game folder' },
+          label: { type: 'string', description: 'backupFiles: what these files are' },
+          items: { type: 'array', items: { type: 'object', properties: { batch: { type: 'string' }, rel: { type: 'string' } } }, description: 'restoreFiles: the items from get_health' },
+          names: { type: 'array', items: { type: 'string' }, description: 'activatePlugins: plugin file names' },
+        },
+        required: ['action'],
+      },
+      run: runFix,
+    },
+  ];
+}
+
+let llmRun = null; // the active chat, so the user can stop it
+handle('llm:chat', async ({ messages, fresh }) => {
+  if (llmRun) throw new Error('The assistant is still working on the last message.');
+  const cfg = llmCfg();
+  if (!cfg.model) throw new Error('Pick a model first (Test connection lists what the server has).');
+  const c = ctx();
+  const tools = llmTools(c);
+  const system = [
+    'You are the built-in assistant of STR Companion, a desktop app that manages a real Skyrim Special Edition install for Skyrim Together Reborn (STR) co-op.',
+    'You can read the app\'s state with tools, match a friend\'s setup from their code, change config values (like the server password), and run its safe one-click fixes. Never claim you changed something unless a tool call succeeded.',
+    'When a user shares a friend\'s setup code and asks you to match it: compare first, explain the differences, then apply the load-order match if they confirm. If plugins are missing, say which and that they can be installed from the Setup page.',
+    'Be concise and practical: name the exact setting, file or mod, and the exact steps. When you run a fix, say what it did and how to undo it (Backups page).',
+    'If you are unsure about a fact, use a tool to check instead of guessing.',
+    'Current state (live, from the app):',
+    llmStateBlock(c),
+    String(llmSettings().systemNote || '').trim(),
+  ].filter(Boolean).join('\n');
+  const run = llmRun = { cancelled: false, controller: new AbortController() };
+  const onEvent = ev => send('llm:event', { id: run.id, ...ev });
+  run.id = `llm-${Date.now()}`;
+  try {
+    const result = await llm.agentLoop(cfg, {
+      system,
+      messages: (fresh ? [] : (messages || [])).slice(-20).map(m => ({ role: m.role, content: String(m.content || '').slice(0, 20000) })),
+      tools,
+      execute: (name, args) => {
+        const t = tools.find(x => x.name === name);
+        if (!t) throw new Error(`Unknown tool ${name}`);
+        return t.run(args || {});
+      },
+      signal: run.controller.signal,
+      onEvent,
+      onDelta: text => send('llm:delta', { id: run.id, text }),
+    });
+    return { text: result.text, steps: result.steps };
+  } catch (e) {
+    if (run.cancelled || /^Cancelled$/.test(e.message)) throw new Error('Stopped.');
+    throw e;
+  } finally {
+    llmRun = null;
+  }
+});
+
+handle('llm:stop', () => {
+  if (llmRun) { llmRun.cancelled = true; llmRun.controller.abort(); }
+  return true;
+});
 
 // ---------- play / server ----------
 handle('launch:status', () => launch.status());
@@ -1176,7 +1414,7 @@ function createWindow() {
 
 /** Developer aid: STRC_SHOTS=<dir> saves a screenshot of every page, then quits. */
 function captureAllPages(dir) {
-  const pages = ['dashboard', 'setup', 'play', 'deck', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'settings'];
+  const pages = ['dashboard', 'setup', 'play', 'deck', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'ai', 'settings'];
   const wait = ms => new Promise(r => setTimeout(r, ms));
   win.webContents.once('did-finish-load', async () => {
     fs.mkdirSync(dir, { recursive: true });

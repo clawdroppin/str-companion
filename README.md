@@ -84,6 +84,7 @@ The app finds Skyrim through Steam. If it doesn't, point it at the folder that c
 | 🐞 **Bug report** | One zip on your Desktop with logs, crash reports, plugin lists and diagnostics. **Passwords are removed.** |
 | ⬆️ **Updates itself** | The sidebar shows new versions; the portable exe and AppImage update in place, SHA-256 verified. |
 | 📜 **Logs** | Server, client, SKSE and Engine Fixes logs in one place, plus a **crash report reader** that names the mods showing up most in each crash (with [Crash Logger](https://www.nexusmods.com/skyrimspecialedition/mods/59818) installed). |
+| ✳ **AI Assistant** | Connect a **local LLM** — LM Studio, Ollama, llama.cpp, anything that speaks the OpenAI API. It reads your live state (health, mods, logs, configs), can **match a friend's setup** from their code, change config values like the server password, and run the same **safe one-click fixes** as the dashboard. Everything stays on your machine, and the model can never delete anything. |
 
 ### 🔒 Safe by design
 - **Nothing is ever deleted.** Files are *moved* to `<Skyrim>\_STRCompanion_Backup\`, with a manifest so every batch can be restored.

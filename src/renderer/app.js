@@ -119,7 +119,7 @@ async function renderNow() {
   clearTimers();
   updateFoot();
   if (!state.valid) return renderWelcome();
-  const pages = { dashboard, setup: setupPage, play, deck, mods, cleanup, config, friends, session, backups, logs, settings };
+  const pages = { dashboard, setup: setupPage, play, deck, mods, cleanup, config, friends, session, backups, logs, ai: aiPage, settings };
   main().innerHTML = `<div class="empty"><span class="spinner"></span> Loading…</div>`;
   try {
     await pages[state.page]();
@@ -1236,6 +1236,183 @@ async function settings() {
     } catch { busy(e.currentTarget, false); }
   });
   if ($('#clearKey')) $('#clearKey').addEventListener('click', async () => { await call('nexus:setKey', ''); render(); });
+}
+
+// ---------- AI assistant (local LLM) ----------
+// Chat history lives here so it survives page switches while a reply streams in.
+const ai = { chat: [], busy: false, runId: null, models: [] };
+
+function scrollAi() {
+  const el = document.querySelector('#aiChat');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+// Only one chat runs at a time (the main process enforces it), so while busy these events are ours.
+api.on('llm:delta', ev => {
+  if (!ai.busy) return;
+  const bodies = document.querySelectorAll('#aiChat .msg.ai .body');
+  const el = bodies[bodies.length - 1];
+  if (el) { el.textContent += ev.text; scrollAi(); }
+});
+
+api.on('llm:event', ev => {
+  if (!ai.busy) return;
+  const box = document.querySelector('#aiTools');
+  if (!box) return;
+  if (ev.type === 'tool') {
+    const el = document.createElement('div');
+    el.className = 'ai-tool';
+    const args = ev.arguments && Object.keys(ev.arguments).length ? ` ${esc(JSON.stringify(ev.arguments).slice(0, 90))}` : '';
+    el.innerHTML = `<span class="spinner"></span> ${esc(ev.name)}${args}`;
+    box.appendChild(el);
+  } else if (ev.type === 'toolDone') {
+    const els = box.querySelectorAll('.ai-tool');
+    const el = els[els.length - 1];
+    if (el) {
+      const err = ev.result && ev.result.error;
+      el.innerHTML = `${err ? '✕' : '✓'} ${esc(ev.name)}${err ? ` — ${esc(err)}` : ''}`;
+      el.classList.add(err ? 'err' : 'done');
+    }
+  }
+  scrollAi();
+});
+
+async function aiPage() {
+  const s = await call('llm:settings');
+  const connected = !!(s.baseUrl && s.model);
+  main().innerHTML = head('AI Assistant', 'A local AI that can read this app\'s state and run its safe one-click fixes. Every request goes only to the local server you point it at — nothing leaves your machine, and the model can never delete anything.',
+    `<button class="btn" id="aiClear">Clear chat</button>`) + `
+    <div class="card">
+      <div class="card-head"><div><h2>Local server</h2><div class="sub">LM Studio, Ollama, llama.cpp or anything that speaks the OpenAI API. In LM Studio: Developer tab → Start Server.</div></div>
+        <div class="row">${['LM Studio', 'Ollama', 'llama.cpp'].map((n, i) => `<button class="btn small ghost" data-preset="${i}">${n}</button>`).join('')}</div></div>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap">
+        <input type="text" id="aiUrl" placeholder="http://localhost:1234/v1" value="${esc(s.baseUrl)}" style="flex:2;min-width:220px">
+        <input type="text" id="aiModel" list="aiModels" placeholder="Model (e.g. qwen3-8b)" value="${esc(s.model)}" style="flex:2;min-width:180px">
+        <datalist id="aiModels">${ai.models.map(m => `<option value="${esc(m)}">`).join('')}</datalist>
+        <input type="password" id="aiKey" placeholder="API key (optional)" value="${s.hasKey ? '••••••••' : ''}" autocomplete="off" style="flex:1;min-width:140px">
+      </div>
+      <div class="row" style="margin-top:10px;flex-wrap:wrap">
+        <label class="sub" style="display:flex;align-items:center;gap:6px">Temperature <input type="number" id="aiTemp" min="0" max="2" step="0.1" value="${s.temperature}" style="width:70px"></label>
+        <label class="sub" style="display:flex;align-items:center;gap:6px">Max tokens <input type="number" id="aiMax" min="0" step="256" value="${s.maxTokens}" style="width:90px"><span class="sub">(0 = server default)</span></label>
+        <span style="flex:1"></span>
+        <button class="btn" id="aiTest">Test connection</button>
+        <button class="btn primary" id="aiSave">Save</button>
+      </div>
+      <div id="aiStatus" class="sub" style="margin-top:8px"></div>
+      <details style="margin-top:8px"><summary class="sub" style="cursor:pointer">Extra instructions for the assistant</summary>
+        <textarea id="aiNote" rows="2" placeholder="Optional, e.g. “I play with a fixed group of 4, host most weeks.”" style="margin-top:8px">${esc(s.systemNote || '')}</textarea>
+      </details>
+    </div>
+    <div class="card">
+      <div class="card-head"><div><h2>Chat</h2><div class="sub">It can check your setup, read logs and configs, and run the same one-click fixes as the dashboard (backing up first, like everything else here).</div></div></div>
+      <div id="aiChat" class="ai-chat">
+        ${ai.chat.length ? ai.chat.map(m => `<div class="msg ${m.role === 'user' ? 'me' : 'ai'}"><div class="body">${esc(m.content)}</div></div>`).join('') : '<div class="sub" style="padding:8px 2px">Ask anything: “Why did my server crash last night?”, “Which mods should I add for a 4-person co-op?”, “Fix the problems on my dashboard.”</div>'}
+      </div>
+      <div id="aiTools"></div>
+      <div class="row" style="margin-top:10px;gap:8px">
+        <textarea id="aiInput" rows="2" placeholder="Ask the assistant…" style="flex:1"></textarea>
+        <div class="row" style="flex-direction:column;justify-content:flex-end">
+          <button class="btn primary" id="aiSend" ${connected ? '' : 'disabled'}>Send</button>
+          <button class="btn ghost" id="aiStop" style="display:none">Stop</button>
+        </div>
+      </div>
+    </div>`;
+
+  const status = msg => { const el = $('#aiStatus'); if (el) el.innerHTML = msg || ''; };
+  const PRESETS = [['http://localhost:1234/v1', ''], ['http://localhost:11434/v1', ''], ['http://localhost:8080/v1', '']];
+  main().querySelectorAll('[data-preset]').forEach(b => b.addEventListener('click', () => {
+    const [url] = PRESETS[Number(b.dataset.preset)];
+    $('#aiUrl').value = url;
+    $('#aiModel').value = '';
+    ai.models = [];
+    status('');
+  }));
+
+  $('#aiSave').addEventListener('click', async () => {
+    const btn = $('#aiSave');
+    busy(btn, true, 'Saving…');
+    try {
+      const patch = { baseUrl: $('#aiUrl').value, model: $('#aiModel').value, temperature: Number($('#aiTemp').value) || 0, maxTokens: Number($('#aiMax').value) || 0, systemNote: $('#aiNote').value };
+      const key = $('#aiKey').value.trim();
+      if (key && !key.startsWith('•')) patch.apiKey = key;
+      await call('llm:save', patch);
+      $('#aiKey').value = '';
+      toast('Saved', 'ok');
+      render();
+    } catch { busy(btn, false); }
+  });
+
+  $('#aiTest').addEventListener('click', async () => {
+    const btn = $('#aiTest');
+    busy(btn, true, 'Testing…');
+    status('');
+    try {
+      // Save first, so the test uses exactly what the user typed.
+      const patch = { baseUrl: $('#aiUrl').value, model: $('#aiModel').value, temperature: Number($('#aiTemp').value) || 0, maxTokens: Number($('#aiMax').value) || 0, systemNote: $('#aiNote').value };
+      const key = $('#aiKey').value.trim();
+      if (key && !key.startsWith('•')) patch.apiKey = key;
+      await call('llm:save', patch);
+      const r = await call('llm:test');
+      ai.models = r.models;
+      if (!$('#aiModel').value.trim()) $('#aiModel').value = r.models[0];
+      const dl = $('#aiModels');
+      dl.innerHTML = r.models.map(m => `<option value="${esc(m)}">`).join('');
+      status(`✓ Connected — ${r.models.length} model${r.models.length === 1 ? '' : 's'}: ${r.models.slice(0, 6).map(esc).join(', ')}${r.models.length > 6 ? '…' : ''}`);
+      toast('Connected', 'ok');
+    } catch (e) {
+      status(`<span style="color:var(--err)">✕ ${esc(e.message)}</span>`);
+    } finally { busy(btn, false); }
+  });
+
+  $('#aiClear').addEventListener('click', async () => {
+    if (ai.busy) return;
+    ai.chat = [];
+    render();
+  });
+
+  const setBusy = on => {
+    ai.busy = on;
+    $('#aiSend').style.display = on ? 'none' : '';
+    $('#aiStop').style.display = on ? '' : 'none';
+    $('#aiSend').disabled = false;
+  };
+
+  const sendMsg = async () => {
+    const input = $('#aiInput');
+    const text = input.value.trim();
+    if (!text || ai.busy) return;
+    ai.chat.push({ role: 'user', content: text });
+    input.value = '';
+    const history = ai.chat.slice(0, -1);
+    // The streaming bubble.
+    const chatEl = $('#aiChat');
+    const hint = chatEl.querySelector('.sub');
+    if (hint) hint.remove();
+    const bubble = document.createElement('div');
+    bubble.className = 'msg ai';
+    bubble.innerHTML = '<div class="body"></div>';
+    chatEl.appendChild(bubble);
+    $('#aiTools').innerHTML = '';
+    setBusy(true);
+    try {
+      const r = await api.call('llm:chat', { messages: history, fresh: false });
+      bubble.querySelector('.body').textContent = r.text;
+      ai.chat.push({ role: 'assistant', content: r.text });
+    } catch (e) {
+      const partial = bubble.querySelector('.body').textContent;
+      if (partial) { bubble.querySelector('.body').textContent += `\n\n— ${e.message}`; ai.chat.push({ role: 'assistant', content: partial }); }
+      else bubble.remove();
+      if (!/^Stopped\.$/.test(e.message)) toast(e.message, 'err');
+    } finally {
+      setBusy(false);
+      scrollAi();
+    }
+  };
+
+  $('#aiSend').addEventListener('click', sendMsg);
+  $('#aiStop').addEventListener('click', () => { call('llm:stop').catch(() => {}); });
+  $('#aiInput').addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMsg(); } });
+  scrollAi();
 }
 
 // ---------- boot ----------

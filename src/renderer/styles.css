@@ -211,6 +211,18 @@ pre.log { background: #0f0d0a; border: 1px solid var(--line-soft); border-radius
 .diff .lvl { font-size: 11px; font-weight: 700; text-transform: uppercase; width: 54px; flex: none; padding-top: 2px; }
 .diff.error .lvl { color: var(--err); } .diff.warn .lvl { color: var(--warn); } .diff.info .lvl { color: var(--info); }
 
+/* ---------- AI assistant ---------- */
+.ai-chat { display: flex; flex-direction: column; gap: 10px; max-height: 420px; overflow-y: auto; padding: 14px; background: #15120e; border: 1px solid var(--line-soft); border-radius: 9px; }
+.msg { max-width: 85%; padding: 10px 14px; border-radius: 10px; font-size: 13.5px; line-height: 1.5; }
+.msg .body { white-space: pre-wrap; word-break: break-word; }
+.msg.me { align-self: flex-end; background: linear-gradient(180deg, #332b1d, #2c2519); border: 1px solid #57493a; }
+.msg.ai { align-self: flex-start; background: var(--panel); border: 1px solid var(--line-soft); }
+.msg.ai .body:empty::before { content: "…"; color: var(--faint); }
+.ai-tool { display: flex; align-items: center; gap: 7px; margin-top: 6px; padding: 5px 10px; border: 1px dashed var(--line); border-radius: 7px; font: 12px var(--mono); color: var(--muted); word-break: break-all; }
+.ai-tool .spinner { width: 12px; height: 12px; border-width: 2px; }
+.ai-tool.done { color: var(--ok); border-color: #3e5733; }
+.ai-tool.err { color: var(--err); border-color: #5c2d28; }
+
 /* ---------- toasts & modal ---------- */
 #toasts { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }
 .toast { background: #2b251c; border: 1px solid var(--line); border-left: 3px solid var(--gold); padding: 10px 14px; border-radius: 8px; box-shadow: var(--shadow); max-width: 420px; font-size: 13.5px; animation: in .18s ease-out; }

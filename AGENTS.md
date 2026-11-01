@@ -57,6 +57,7 @@ src/core/       Pure Node modules that touch the game. No Electron imports. Unit
   mods.js       catalog + Vortex + registry merge, Nexus update checks
   nexus.js      Nexus Mods v1 API client, downloads
   logs.js       server session parsing, client log problems, SKSE plugin load results, crash-report summaries
+  llm.js        OpenAI-compatible local LLM client (LM Studio, Ollama, llama.cpp): SSE streaming, tool-call agent loop
   launch.js     process status, launching client/server, Steam auto-update setting
   share.js      STR2- setup codes (deflate + base64url JSON, STR1- still parsed), comparison, load-order match plans
 src/main/       Electron main process. main.js = IPC handlers (`handle('channel', fn)`), preload.js = bridge
