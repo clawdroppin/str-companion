@@ -22,8 +22,9 @@ const setup = require('../core/setup');
 const steamdeck = require('../core/steamdeck');
 const upnp = require('../core/upnp');
 const report = require('../core/report');
+const ai = require('../core/ai');
+const aitools = require('../core/aitools');
 const selfupdate = require('../core/selfupdate');
-const llm = require('../core/llm');
 const { sevenZip } = require('../core/installer');
 const { IniDoc } = require('../core/ini');
 
@@ -136,7 +137,10 @@ process.on('unhandledRejection', e => logError('unhandled rejection', e));
 
 // Expected failures (bad input, network) carry a plain message; anything else is a bug and gets logged.
 const EXPECTED = new Set(['NO_GAME']);
+// Every handler by channel, so the AI helper can use the app exactly the way the pages do.
+const handlers = {};
 function handle(channel, fn) {
+  handlers[channel] = fn;
   ipcMain.handle(channel, async (_e, ...args) => {
     try {
       return { ok: true, data: await fn(...args) };
@@ -184,7 +188,8 @@ handle('game:pickDir', async () => {
 });
 
 const PUBLIC_SETTINGS = ['playerName', 'checklist', 'autoSnapshot', 'keepAutoSnapshots', 'extraBackupDir', 'uiScale'];
-handle('settings:set', patch => {
+handle('settings:set', (patch = {}) => {
+  patch = patch && typeof patch === 'object' ? patch : {};
   const allowed = {};
   for (const k of PUBLIC_SETTINGS) if (k in patch) allowed[k] = patch[k];
   if ('keepAutoSnapshots' in allowed) allowed.keepAutoSnapshots = Math.max(1, Math.min(100, Number(allowed.keepAutoSnapshots) || 10));
@@ -264,8 +269,12 @@ handle('cleanup:backupPlugins', names => {
   const rels = chosen.flatMap(p => [p.name, ...p.archives].map(f => path.join('Data', f)));
   return c.backups.backup(rels, { label: chosen.length === 1 ? chosen[0].name : `${chosen.length} mods`, category: 'mods' });
 });
-handle('cleanup:setActive', (name, active) => {
+handle('cleanup:setActive', async (name, active) => {
+  const st = await launch.status();
+  if (st.game || st.client) throw new Error('Close Skyrim first — it rewrites Plugins.txt when it exits.');
+  if (!plugins.PLUGIN_RE.test(String(name))) throw new Error(`${name} isn't a plugin file name.`);
   const c = ctx();
+  c.backups.snapshotConfig(util.resolveCI(c.paths.localAppDir, 'Plugins.txt'));
   if (active) plugins.addToPluginsTxt(c.paths.localAppDir, [name]);
   else {
     const file = util.resolveCI(c.paths.localAppDir, 'Plugins.txt');
@@ -280,6 +289,26 @@ handle('backups:list', () => ctx().backups.list());
 handle('backups:usage', () => ctx().backups.usage());
 handle('backups:restore', (id, rels) => ctx().backups.restore(id, rels || null));
 handle('backups:delete', id => ctx().backups.deleteBatch(id));
+/** Config files the app edits, by file name, so an old version can find its way back. */
+function configTargets(c) {
+  const map = new Map(configs.configFiles(c.paths).map(f => [path.basename(f.file).toLowerCase(), f]));
+  map.set('plugins.txt', { id: 'plugins', file: util.resolveCI(c.paths.localAppDir, 'Plugins.txt') });
+  return map;
+}
+handle('backups:configHistory', () => {
+  const c = ctx();
+  const targets = configTargets(c);
+  return c.backups.listConfigHistory().filter(v => targets.has(v.name.toLowerCase())).slice(0, 200);
+});
+handle('backups:restoreConfig', async id => {
+  const c = ctx();
+  const name = String(id).split('/').pop().replace(/\.\d+$/, '').toLowerCase();
+  const t = configTargets(c).get(name);
+  if (!t) throw new Error("The app doesn't know where that file belongs.");
+  // Skyrim rewrites its INIs and Plugins.txt on exit, which would undo the restore.
+  if (t.id !== 'server') await assertGameClosed(t.id === 'plugins' ? 'prefs' : t.id);
+  return c.backups.restoreConfigVersion(id, t.file);
+});
 handle('backups:open', () => {
   const c = ctx();
   fs.mkdirSync(c.backups.root, { recursive: true });
@@ -437,243 +466,6 @@ handle('nexus:status', async () => {
 });
 handle('nexus:openKeyPage', () => shell.openExternal('https://next.nexusmods.com/settings/api-keys'));
 
-// ---------- local AI assistant ----------
-// A local LLM (LM Studio, Ollama, …) chats with the user and can read the app's state or run the
-// same one-click fixes the dashboard offers. Everything stays on this machine: the only traffic is
-// to the address the user typed, and the tools below are the only things the model can do.
-
-const LLM_DEFAULTS = { baseUrl: 'http://localhost:1234/v1', model: '', temperature: 0.3, maxTokens: 0, systemNote: '' };
-function llmSettings() {
-  const s = loadSettings();
-  return { ...LLM_DEFAULTS, ...(s.llm || {}) };
-}
-function llmCfg() {
-  const s = llmSettings();
-  let apiKey = null;
-  if (s.apiKeyEnc) {
-    try { apiKey = safeStorage.decryptString(Buffer.from(s.apiKeyEnc, 'base64')); } catch {}
-  }
-  return { baseUrl: s.baseUrl, model: s.model, apiKey, temperature: s.temperature, maxTokens: s.maxTokens };
-}
-
-handle('llm:settings', () => {
-  const s = llmSettings();
-  return { baseUrl: s.baseUrl, model: s.model, hasKey: !!s.apiKeyEnc, temperature: s.temperature, maxTokens: s.maxTokens, systemNote: s.systemNote };
-});
-
-handle('llm:save', patch => {
-  const s = { ...llmSettings(), ...patch };
-  if (s.baseUrl) s.baseUrl = llm.normalizeBase(s.baseUrl);
-  s.model = String(s.model || '').trim();
-  s.temperature = Math.max(0, Math.min(2, Number(s.temperature) || 0));
-  s.maxTokens = Math.max(0, Math.min(32768, Number(s.maxTokens) || 0));
-  s.systemNote = String(s.systemNote || '').slice(0, 2000);
-  if (patch.apiKey !== undefined) {
-    const key = String(patch.apiKey || '').trim();
-    if (key) {
-      if (!safeStorage.isEncryptionAvailable()) throw new Error(process.platform === 'win32' ? 'Windows secure storage is unavailable, so the key cannot be saved safely.' : 'No system keyring is available, so the key cannot be saved safely.');
-      s.apiKeyEnc = safeStorage.encryptString(key).toString('base64');
-    } else {
-      s.apiKeyEnc = null;
-    }
-  }
-  updateSettings({ llm: s });
-  return { baseUrl: s.baseUrl, model: s.model, hasKey: !!s.apiKeyEnc, temperature: s.temperature, maxTokens: s.maxTokens, systemNote: s.systemNote };
-});
-
-handle('llm:test', async () => {
-  const models = await llm.listModels(llmCfg());
-  return { models };
-});
-
-/** Compact state the assistant starts with, so even a model without tool support can help. */
-function llmStateBlock(c) {
-  const snap = health.snapshot(c.paths);
-  const checks = health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen, crashAck: c.s.crashAck, clientCrashAck: c.s.clientCrashAck === snap.client.updatedAt });
-  const mods = mods.modList(c.paths, c.installer.registry(), c.s.customMods || [], logs.sksePluginResults(c.paths).results)
-    .filter(m => m.installed || m.category === 'Essentials')
-    .map(m => `${m.name}${m.installed ? ` ${m.installedVersion || ''}`.trim() : ' (not installed)'} [${m.compat}]`);
-  return [
-    `Game: Skyrim ${snap.gameVersion || '?'} · Skyrim Together ${snap.str.version || 'not installed'} · SKSE ${snap.skse.version || 'not installed'} · ${snap.loadOrder.length} plugins loaded · manager: ${snap.manager || 'none'}`,
-    `Health: ${checks.filter(x => x.level === 'error').length} problems, ${checks.filter(x => x.level === 'warn').length} warnings.`,
-    ...checks.filter(x => x.level !== 'ok').slice(0, 12).map(x => `  - [${x.level}] ${x.title}`),
-    `Installed mods: ${mods.length ? mods.slice(0, 40).join(', ') : 'none detected'}`,
-  ].join('\n');
-}
-
-/** The tools the model may call. Reads are free; actions are exactly the dashboard's one-click fixes. */
-function llmTools(c) {
-  const runFix = async args => {
-    const allowed = ['backupCC', 'backupFiles', 'restoreFiles', 'activatePlugins', 'steamUpdateOnLaunch', 'ackVersions'];
-    if (!allowed.includes(args.action)) throw new Error(`Only these fixes can be run: ${allowed.join(', ')}`);
-    switch (args.action) {
-      case 'backupCC': return backupCreationClub(c);
-      case 'backupFiles': return c.backups.backup(args.rels, { label: args.label || 'AI assistant', category: 'known-issue' });
-      case 'restoreFiles': {
-        const byBatch = {};
-        for (const it of args.items || []) (byBatch[it.batch] = byBatch[it.batch] || []).push(it.rel);
-        let restored = 0;
-        for (const [id, rels] of Object.entries(byBatch)) restored += c.backups.restore(id, rels).restored;
-        return { restored };
-      }
-      case 'activatePlugins': {
-        const names = (args.names || []).filter(n => plugins.PLUGIN_RE.test(n));
-        c.backups.snapshotConfig(util.resolveCI(c.paths.localAppDir, 'Plugins.txt'));
-        plugins.addToPluginsTxt(c.paths.localAppDir, names);
-        return { done: true, names };
-      }
-      case 'steamUpdateOnLaunch': await launch.setSteamAutoUpdate(c.paths, 1); return { done: true };
-      case 'ackVersions': updateSettings({ lastSeen: currentVersions(health.snapshot(c.paths)) }); return { done: true };
-    }
-  };
-  return [
-    {
-      name: 'get_health',
-      description: 'Current health check: versions, load order, plugin limits, problems and warnings, each with its one-click fix (action + label).',
-      parameters: { type: 'object', properties: {} },
-      run: () => { const snap = health.snapshot(c.paths); return { snapshot: { gameVersion: snap.gameVersion, str: snap.str, skse: snap.skse, addressLibrary: snap.addressLibrary, pluginCount: snap.loadOrder.length, manager: snap.manager, autoUpdate: snap.autoUpdate }, checks: health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen, crashAck: c.s.crashAck, clientCrashAck: c.s.clientCrashAck === snap.client.updatedAt }) }; },
-    },
-    {
-      name: 'get_mods',
-      description: 'The mod catalog with what is installed, versions, and STR compatibility (safe/likely/test).',
-      parameters: { type: 'object', properties: {} },
-      run: () => ({ mods: mods.modList(c.paths, c.installer.registry(), c.s.customMods || [], logs.sksePluginResults(c.paths).results).map(m => ({ name: m.name, installed: !!m.installed, version: m.installedVersion || null, compat: m.compat, category: m.category, desc: (m.desc || '').slice(0, 120) })) }),
-    },
-    {
-      name: 'get_logs',
-      description: 'Recent server session, Skyrim Together client log problems, SKSE plugin load results, and the latest crash reports.',
-      parameters: { type: 'object', properties: {} },
-      run: () => ({ server: logs.serverSession(c.paths), client: logs.clientLog(c.paths), skse: logs.sksePluginResults(c.paths), crashes: logs.crashReports(c.paths, plugins.effectiveLoadOrder(c.paths.gameDir, c.paths.localAppDir).order.map(p => p.name), 3) }),
-    },
-    {
-      name: 'get_config',
-      description: 'Read one config file: server (STServer.ini), prefs, skyrim, custom, enginefixes or displaytweaks. Returns its current values.',
-      parameters: { type: 'object', properties: { id: { type: 'string', enum: ['server', 'prefs', 'skyrim', 'custom', 'enginefixes', 'displaytweaks'] } }, required: ['id'] },
-      run: args => { const d = configs.load(c.paths, args.id); return { id: args.id, title: d.title, exists: d.exists, values: d.entries.filter(e => !e.missing).map(e => ({ section: e.section, key: e.key, value: e.value, label: e.label })) }; },
-    },
-    {
-      name: 'get_setup',
-      description: 'My setup: player name, versions, full plugin list, and the STR2- setup code to share with friends.',
-      parameters: { type: 'object', properties: {} },
-      run: () => { const m = mySetup(c); return { ...m, code: share.makeCode(m) }; },
-    },
-    {
-      name: 'parse_friend_code',
-      description: 'Decode a friend\'s STR2-/STR1- setup code. Returns their player name, game/STR/SKSE versions, and their full plugin list. Read-only.',
-      parameters: { type: 'object', properties: { code: { type: 'string', description: 'The friend\'s setup code (starts with STR2- or STR1-)' } }, required: ['code'] },
-      run: args => { const t = share.parseCode(args.code); return { playerName: t.playerName, gameVersion: t.gameVersion, strVersion: t.strVersion, skseVersion: t.skseVersion, addressLibrary: t.addressLibrary, pluginCount: t.plugins.length, plugins: t.plugins }; },
-    },
-    {
-      name: 'compare_setups',
-      description: 'Compare my setup against a friend\'s code. Returns the differences (most serious first) and a plan of what it would take to match their load order: missing plugins, ones to activate, ones to deactivate, and whether the order differs. Read-only — changes nothing.',
-      parameters: { type: 'object', properties: { code: { type: 'string', description: 'The friend\'s setup code' } }, required: ['code'] },
-      run: args => {
-        const snap = health.snapshot(c.paths);
-        const mine = mySetup(c, snap);
-        const t = share.parseCode(args.code);
-        return { friend: { playerName: t.playerName, pluginCount: t.plugins.length }, diffs: share.compare(mine, t), plan: share.matchPlan(mine, t, localPlugins(c, snap)) };
-      },
-    },
-    {
-      name: 'match_load_order',
-      description: 'Rewrite my Plugins.txt so my load order matches a friend\'s code (activating, deactivating and reordering plugins that are already on my disk). Skyrim must be closed. Plugins.txt is snapshotted first — nothing is deleted. Plugins the friend has that I don\'t are reported as missing, not downloaded.',
-      parameters: { type: 'object', properties: { code: { type: 'string', description: 'The friend\'s setup code to match' } }, required: ['code'] },
-      run: async args => {
-        const st = await launch.status();
-        if (st.game || st.client) throw new Error('Close Skyrim first — it rewrites Plugins.txt when it exits.');
-        const snap = health.snapshot(c.paths);
-        const t = share.parseCode(args.code);
-        const plan = share.matchPlan(mySetup(c, snap), t, localPlugins(c, snap));
-        const file = util.resolveCI(c.paths.localAppDir, 'Plugins.txt');
-        const snapshot = c.backups.snapshotConfig(file);
-        plugins.applyLoadOrder(c.paths.gameDir, c.paths.localAppDir, plan.order);
-        return { ...plan, snapshot, manager: snap.manager };
-      },
-    },
-    {
-      name: 'set_config',
-      description: 'Change one or more config values, e.g. the server password (id "server", section "GameServer", key "sPassword"). Use get_config first to find the exact section and key. The file is snapshotted first; Skyrim must be closed for the game INIs. Returns how many values changed.',
-      parameters: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', enum: ['server', 'prefs', 'skyrim', 'custom', 'enginefixes', 'displaytweaks'] },
-          changes: { type: 'array', items: { type: 'object', properties: { section: { type: 'string' }, key: { type: 'string' }, value: { type: 'string' } }, required: ['section', 'key', 'value'] } },
-        },
-        required: ['id', 'changes'],
-      },
-      run: async args => {
-        await assertGameClosed(args.id);
-        const r = configs.save(c.paths, args.id, args.changes, c.backups);
-        return { ...r, serverRunning: args.id === 'server' ? (await launch.status()).server : false };
-      },
-    },
-    {
-      name: 'run_fix',
-      description: 'Run one of the app\'s safe one-click fixes. backupCC moves Anniversary add-ons to backup; backupFiles moves listed files to backup; restoreFiles restores backed-up files (items from get_health); activatePlugins switches plugins on; steamUpdateOnLaunch sets Steam to update on launch only (Steam must be closed); ackVersions acknowledges a version change. Nothing is ever deleted.',
-      parameters: {
-        type: 'object',
-        properties: {
-          action: { type: 'string', enum: ['backupCC', 'backupFiles', 'restoreFiles', 'activatePlugins', 'steamUpdateOnLaunch', 'ackVersions'] },
-          rels: { type: 'array', items: { type: 'string' }, description: 'backupFiles: file paths relative to the game folder' },
-          label: { type: 'string', description: 'backupFiles: what these files are' },
-          items: { type: 'array', items: { type: 'object', properties: { batch: { type: 'string' }, rel: { type: 'string' } } }, description: 'restoreFiles: the items from get_health' },
-          names: { type: 'array', items: { type: 'string' }, description: 'activatePlugins: plugin file names' },
-        },
-        required: ['action'],
-      },
-      run: runFix,
-    },
-  ];
-}
-
-let llmRun = null; // the active chat, so the user can stop it
-handle('llm:chat', async ({ messages, fresh }) => {
-  if (llmRun) throw new Error('The assistant is still working on the last message.');
-  const cfg = llmCfg();
-  if (!cfg.model) throw new Error('Pick a model first (Test connection lists what the server has).');
-  const c = ctx();
-  const tools = llmTools(c);
-  const system = [
-    'You are the built-in assistant of STR Companion, a desktop app that manages a real Skyrim Special Edition install for Skyrim Together Reborn (STR) co-op.',
-    'You can read the app\'s state with tools, match a friend\'s setup from their code, change config values (like the server password), and run its safe one-click fixes. Never claim you changed something unless a tool call succeeded.',
-    'When a user shares a friend\'s setup code and asks you to match it: compare first, explain the differences, then apply the load-order match if they confirm. If plugins are missing, say which and that they can be installed from the Setup page.',
-    'Be concise and practical: name the exact setting, file or mod, and the exact steps. When you run a fix, say what it did and how to undo it (Backups page).',
-    'If you are unsure about a fact, use a tool to check instead of guessing.',
-    'Current state (live, from the app):',
-    llmStateBlock(c),
-    String(llmSettings().systemNote || '').trim(),
-  ].filter(Boolean).join('\n');
-  const run = llmRun = { cancelled: false, controller: new AbortController() };
-  const onEvent = ev => send('llm:event', { id: run.id, ...ev });
-  run.id = `llm-${Date.now()}`;
-  try {
-    const result = await llm.agentLoop(cfg, {
-      system,
-      messages: (fresh ? [] : (messages || [])).slice(-20).map(m => ({ role: m.role, content: String(m.content || '').slice(0, 20000) })),
-      tools,
-      execute: (name, args) => {
-        const t = tools.find(x => x.name === name);
-        if (!t) throw new Error(`Unknown tool ${name}`);
-        return t.run(args || {});
-      },
-      signal: run.controller.signal,
-      onEvent,
-      onDelta: text => send('llm:delta', { id: run.id, text }),
-    });
-    return { text: result.text, steps: result.steps };
-  } catch (e) {
-    if (run.cancelled || /^Cancelled$/.test(e.message)) throw new Error('Stopped.');
-    throw e;
-  } finally {
-    llmRun = null;
-  }
-});
-
-handle('llm:stop', () => {
-  if (llmRun) { llmRun.cancelled = true; llmRun.controller.abort(); }
-  return true;
-});
-
 // ---------- play / server ----------
 handle('launch:status', () => launch.status());
 handle('launch:client', async () => {
@@ -732,10 +524,15 @@ handle('saves:open', () => shell.openPath(ctx().paths.saves));
 
 // ---------- app updates (GitHub releases) ----------
 const REPO = 'clawdroppin/str-companion';
-handle('app:checkUpdate', async () => {
+/** The newest GitHub release. A bad answer is a network problem, not a bug in the app. */
+async function latestRelease() {
   const r = await fetchText(`https://api.github.com/repos/${REPO}/releases/latest`, { Accept: 'application/vnd.github+json' });
-  if (r.status !== 200) return { hasUpdate: false };
-  const rel = JSON.parse(r.body);
+  if (r.status !== 200) throw new Error("Couldn't reach GitHub.");
+  try { return JSON.parse(r.body); } catch { throw new Error("GitHub's answer couldn't be read."); }
+}
+handle('app:checkUpdate', async () => {
+  let rel;
+  try { rel = await latestRelease(); } catch { return { hasUpdate: false }; }
   const latest = String(rel.tag_name || '').replace(/^v/, '');
   const url = /^https:\/\/github\.com\//.test(rel.html_url) ? rel.html_url : `https://github.com/${REPO}/releases/latest`;
   return { latest, url, hasUpdate: !!latest && util.compareVersions(latest, app.getVersion()) > 0, canSelfUpdate: !!(process.env.PORTABLE_EXECUTABLE_FILE || process.env.APPIMAGE) };
@@ -937,8 +734,8 @@ async function nxmStatus() {
       const m = r.stdout.match(/REG_SZ\s+(.+)/);
       if (m) {
         // Name the program, and notice when it points at a file that no longer exists.
-        const exe = (m[1].match(/^"([^"]+)"/) || m[1].match(/^(S+)/) || [])[1] || '';
-        owner = /vortex/i.test(exe) ? 'Vortex' : /modorganizer|nxmhandler/i.test(exe) ? 'Mod Organizer 2' : (path.win32.basename(exe).replace(/.exe$/i, '') || 'another program');
+        const exe = (m[1].match(/^"([^"]+)"/) || m[1].match(/^(\S+)/) || [])[1] || '';
+        owner = /vortex/i.test(exe) ? 'Vortex' : /modorganizer|nxmhandler/i.test(exe) ? 'Mod Organizer 2' : (path.win32.basename(exe).replace(/\.exe$/i, '') || 'another program');
         ownerMissing = !!exe && !util.exists(exe);
       }
     }
@@ -1306,7 +1103,7 @@ function serverPort(c) {
   const ini = new IniDoc(util.readText(game.strInfo(c.paths).configFile, ''));
   return Number(ini.get('GameServer', 'uPort')) || 10578;
 }
-handle('upnp:status', async () => ({ port: serverPort(ctx()), ...(await upnp.status(serverPort(ctx()))) }));
+handle('upnp:status', async () => { const port = serverPort(ctx()); return { port, ...(await upnp.status(port)) }; });
 handle('upnp:open', () => upnp.openPort(serverPort(ctx())));
 handle('upnp:close', () => upnp.closePort(serverPort(ctx())));
 
@@ -1332,9 +1129,7 @@ handle('report:create', async () => {
 
 // ---------- self-update ----------
 handle('app:selfUpdate', async () => {
-  const r = await fetchText(`https://api.github.com/repos/${REPO}/releases/latest`, { Accept: 'application/vnd.github+json' });
-  if (r.status !== 200) throw new Error("Couldn't reach GitHub.");
-  const rel = JSON.parse(r.body);
+  const rel = await latestRelease();
   const latest = String(rel.tag_name || '').replace(/^v/, '');
   if (util.compareVersions(latest, app.getVersion()) <= 0) return { upToDate: true };
   const target = process.env.PORTABLE_EXECUTABLE_FILE || process.env.APPIMAGE;
@@ -1364,6 +1159,349 @@ handle('app:selfUpdate', async () => {
     setTimeout(() => app.exit(0), 300);
   }
   return { updating: latest };
+});
+
+// ---------- local AI helper ----------
+// The user's own model (Ollama, LM Studio…) chats in a side panel and can use the app through the
+// tools in core/aitools.js. Changes ask the user first unless they switched that off.
+
+const AI_DEFAULTS = { url: '', model: '', allowChanges: false, autoApprove: false, numCtx: 16384, note: '', apiKeyEnc: null };
+const AI_MAX_STEPS = 16;
+/** Saved AI settings. 1.5.0 kept a simpler version under "llm"; it carries over. */
+function aiSaved() {
+  const all = loadSettings();
+  if (all.ai) return { ...AI_DEFAULTS, ...all.ai };
+  const old = all.llm;
+  if (old && old.baseUrl) return { ...AI_DEFAULTS, url: old.baseUrl, model: old.model || '', note: old.systemNote || '', apiKeyEnc: old.apiKeyEnc || null };
+  return { ...AI_DEFAULTS };
+}
+function aiApiKey(s) {
+  if (!s.apiKeyEnc) return null;
+  try { return safeStorage.decryptString(Buffer.from(s.apiKeyEnc, 'base64')); } catch { return null; }
+}
+/** What the panel may see: never the key itself. */
+function aiPublic(s) {
+  const { apiKeyEnc, ...rest } = s;
+  return { ...rest, hasKey: !!apiKeyEnc, local: s.url ? ai.isLocalUrl(s.url) : true };
+}
+function aiSettings() {
+  const s = aiSaved();
+  // Test runs point at a stand-in server (scripts/ui-check.js).
+  if (process.env.STRC_AI_URL && process.env.STRC_SHOTS) Object.assign(s, { url: process.env.STRC_AI_URL, model: 'mock', allowChanges: true });
+  return s;
+}
+
+const aiKinds = new Map(); // url -> 'ollama' | 'openai'
+const aiTextMode = new Set(); // url|model pairs whose server rejected tools
+async function aiKind(url) {
+  if (!aiKinds.has(url)) aiKinds.set(url, await ai.detectKind(url));
+  return aiKinds.get(url);
+}
+
+handle('ai:getSettings', () => ({ ...aiPublic(aiSettings()), presets: ai.PRESETS }));
+handle('ai:setSettings', (patch = {}) => {
+  patch = patch && typeof patch === 'object' ? patch : {};
+  const cur = aiSaved();
+  if ('url' in patch) { cur.url = patch.url ? ai.normalizeUrl(patch.url) : ''; aiKinds.delete(cur.url); }
+  if ('model' in patch) cur.model = String(patch.model || '').slice(0, 200);
+  for (const k of ['allowChanges', 'autoApprove']) if (k in patch) cur[k] = !!patch[k];
+  if ('numCtx' in patch) cur.numCtx = Math.max(2048, Math.min(262144, Math.round(Number(patch.numCtx)) || 16384));
+  if ('note' in patch) cur.note = String(patch.note || '').slice(0, 2000);
+  // Like the Nexus key: encrypted by the OS, never sent back to the window. Empty clears it.
+  if ('apiKey' in patch) {
+    const key = String(patch.apiKey || '').trim();
+    if (!key) cur.apiKeyEnc = null;
+    else {
+      if (!safeStorage.isEncryptionAvailable()) throw new Error('No secure storage is available, so the API key cannot be saved safely.');
+      cur.apiKeyEnc = safeStorage.encryptString(key).toString('base64');
+    }
+  }
+  updateSettings({ ai: cur });
+  return aiPublic(cur);
+});
+handle('ai:models', async (url, apiKey) => {
+  const u = ai.normalizeUrl(url || aiSettings().url);
+  aiKinds.delete(u);
+  const kind = await aiKind(u);
+  const key = String(apiKey || '').trim() || aiApiKey(aiSaved());
+  return { kind, models: await ai.listModels(u, kind, key), local: ai.isLocalUrl(u) };
+});
+
+let aiMessages = []; // the conversation (without the briefing), in core/ai.js's neutral shape
+let aiRun = null;
+let aiPage = 'dashboard';
+const aiEmit = ev => send('ai:event', ev);
+
+/** Short facts about this PC for the briefing, gathered once per question. */
+async function aiState() {
+  const out = [`- STR Companion ${app.getVersion()} on ${process.platform === 'win32' ? 'Windows' : steamdeck.isSteamDeck() ? 'Steam Deck' : 'Linux'}`];
+  let c;
+  try { c = ctx(); } catch { return out.concat('- No Skyrim folder chosen yet: the user must pick it on the welcome screen. Most tools will fail until then.').join('\n'); }
+  try {
+    const snap = health.snapshot(c.paths);
+    const st = await launch.status();
+    const problems = health.checks(c.paths, snap, c.backups, { lastSeen: c.s.lastSeen, crashAck: c.s.crashAck }).filter(x => x.level === 'error' || x.level === 'warn');
+    out.push(
+      `- Game folder: ${c.paths.gameDir}`,
+      `- Skyrim ${snap.gameVersion || '?'}; SKSE ${snap.skse.installed ? snap.skse.version : 'not installed'}; Address Library ${snap.addressLibrary.matchesGame ? 'matches' : 'missing or wrong'}; Skyrim Together ${snap.str.installed ? snap.str.version || 'installed' : 'not installed'}`,
+      `- ${snap.loadOrder.length} plugins load (${snap.inactive.length} off); mod manager: ${snap.manager || 'none detected'}; removable Anniversary add-ons: ${snap.cc.removable.length}`,
+      `- Running: ${['game', 'client', 'server', 'steam'].filter(k => st[k]).join(', ') || 'nothing'}`,
+      `- Nexus key: ${c.nexus.configured ? 'yes' : 'no'}; player name: ${c.s.playerName}; friends saved: ${(c.s.party || []).length}`,
+      problems.length ? `- Dashboard problems: ${problems.map(p => `${p.level === 'error' ? '✖' : '!'} ${p.title}`).join('; ')}` : '- The dashboard shows no problems.',
+    );
+  } catch (e) {
+    out.push(`- (Couldn't read the game's state: ${e.message})`);
+  }
+  out.push(`- The user is looking at the "${aiPage}" page.`);
+  return out.join('\n');
+}
+
+const pick = (o, keys) => Object.fromEntries(keys.filter(k => o && o[k] !== undefined).map(k => [k, o[k]]));
+
+/** What each tool does, on top of the same handlers the pages call. Results are trimmed for small models. */
+const aiExec = {
+  async get_overview() {
+    const h = await handlers['health:get']();
+    return {
+      ...h.snapshot,
+      checks: h.checks.map(x => pick(x, ['level', 'title', 'detail', 'fix'])),
+      running: await launch.status(),
+      nexus: await handlers['nexus:status'](),
+      page: aiPage,
+    };
+  },
+  get_load_order() {
+    const c = ctx();
+    const snap = health.snapshot(c.paths);
+    return {
+      loads: snap.loadOrder.map((p, i) => `${i}. ${p.name}${p.source && p.source !== 'plugins.txt' ? ` (${p.source})` : ''}`),
+      off: snap.inactive,
+      missingMasters: snap.masterProblems,
+      counts: snap.counts,
+    };
+  },
+  async list_mods({ installedOnly } = {}) {
+    const d = await handlers['mods:list']();
+    return d.mods.filter(m => !installedOnly || m.installed).map(m => pick(m, ['id', 'name', 'category', 'compat', 'installed', 'installedVersion', 'manager', 'registryKey', 'loadStatus', 'custom', 'versionLocked']));
+  },
+  check_mod_updates: () => handlers['mods:checkUpdates'](),
+  async cleanup_report() {
+    const r = await handlers['cleanup:report']();
+    return {
+      creationClub: { removable: r.cc.removable.map(i => i.plugin), keep: r.cc.keep.map(i => i.plugin || i) },
+      plugins: r.plugins.map(p => ({ name: p.name, active: p.active, protected: !!p.protected, creationClub: !!p.creationClub, masters: p.masters, manager: p.manager || undefined })),
+      knownIssues: r.issues,
+      manager: r.manager,
+    };
+  },
+  async read_config({ file, all, section }) {
+    const d = await handlers['config:load'](file);
+    if (!d.exists) return { exists: false, file: d.file, note: 'The file does not exist yet; set_config_values creates it.' };
+    const entries = d.entries
+      .filter(e => (all || e.featured) && (!section || String(e.section).toLowerCase() === String(section).toLowerCase()))
+      .map(e => ({ section: e.section, key: e.key, value: e.type === 'secret' ? (e.value ? '(set, hidden)' : '') : e.value, ...(e.featured ? { label: e.label, type: e.type } : {}), ...(e.options ? { options: e.options.map(o => (Array.isArray(o) ? o[0] : o)) } : {}), ...(e.missing ? { notInFile: true } : {}), ...(e.warn ? { warn: e.warn } : {}) }));
+    return { file: d.file, note: d.note, sections: d.sections, entries, ...(all ? {} : { hint: 'Only well-known settings; pass all=true for every key.' }) };
+  },
+  list_presets: async ({ file }) => (await handlers['config:presets'](file)).map(p => pick(p, ['name', 'description', 'builtin', 'values'])),
+  async list_backups() {
+    const c = ctx();
+    return {
+      batches: c.backups.list().map(b => ({ id: b.id, label: b.label, category: b.category, createdAt: b.createdAt, files: b.files.length })),
+      saveSnapshots: c.backups.listSaveSnapshots().map(s => pick(s, ['id', 'note', 'createdAt', 'auto', 'files', 'size'])),
+      configHistory: (await handlers['backups:configHistory']()).slice(0, 40),
+    };
+  },
+  read_log({ log, lines }) {
+    const f = logs.logFiles(ctx().paths).find(l => l.id === log);
+    if (!f || !f.exists) return { exists: false, note: `There is no ${log} log yet.` };
+    return logs.tail(f.file, Math.max(10, Math.min(400, Number(lines) || 120)));
+  },
+  async get_crash_reports() {
+    const r = await handlers['logs:crashes']();
+    return { ...r, reports: r.reports.slice(0, 3) };
+  },
+  get_server_session: () => handlers['server:session'](),
+  async get_network_info() {
+    const out = { localIps: (await handlers['net:info']()).local };
+    try { out.publicIp = await handlers['net:publicIp'](); } catch (e) { out.publicIp = `unknown (${e.message})`; }
+    try { out.router = await handlers['upnp:status'](); } catch (e) { out.router = `unknown (${e.message})`; }
+    return out;
+  },
+  async get_my_setup_code() {
+    const m = await handlers['share:mine']();
+    return { code: m.code, playerName: m.setup.playerName, gameVersion: m.setup.gameVersion, strVersion: m.setup.strVersion, plugins: m.setup.plugins.length, mods: m.setup.mods.length };
+  },
+  async compare_setup_code({ code }) {
+    const r = await handlers['share:compare'](code);
+    return { friend: pick(r.theirs, ['playerName', 'gameVersion', 'strVersion', 'skseVersion']), differences: r.diffs, loadOrderPlan: pick(r.plan, ['missing', 'activate', 'deactivate', 'extraImplicit', 'reorder', 'changes']) };
+  },
+  list_party: () => handlers['party:list'](),
+  quick_setup_plan: ({ code }) => handlers['setup:plan'](code || undefined),
+  get_steam_status: () => handlers['deck:status'](),
+  get_app_settings: () => handlers['settings:set']({}),
+  open_page({ page }) { aiEmit({ type: 'navigate', page }); return { shown: page }; },
+
+  set_config_values: async ({ file, changes }) => ({ ...(await handlers['config:save'](file, changes)), note: 'The previous file is in config history (list_backups).' }),
+  apply_preset: ({ file, name }) => handlers['config:applyPreset'](file, name),
+  save_preset: ({ file, name }) => handlers['config:savePreset'](file, name),
+  run_fix({ fix }) {
+    if (fix.action === 'goto') return aiExec.open_page({ page: fix.page });
+    return handlers['fix:run'](fix);
+  },
+  move_creation_club_to_backup: ({ plugins: only }) => handlers['cleanup:backupCC'](only && only.length ? only : null),
+  move_mods_to_backup: ({ plugins: names }) => handlers['cleanup:backupPlugins'](names),
+  set_plugin_enabled: ({ plugin, enabled }) => handlers['cleanup:setActive'](plugin, enabled),
+  restore_backup: ({ batch, files }) => handlers['backups:restore'](batch, files && files.length ? files : null),
+  restore_config_version: ({ version }) => handlers['backups:restoreConfig'](version),
+  take_save_snapshot: ({ note }) => handlers['saves:snapshot'](note || 'Taken by the AI helper'),
+  server_control: ({ action }) => handlers[{ start: 'launch:server', stop: 'launch:stopServer', restart: 'launch:restartServer' }[action]](),
+  launch_game: () => handlers['launch:client'](),
+  match_load_order: ({ code }) => handlers['share:applyMatch'](code),
+  party({ action, code, name }) {
+    if (action === 'save') { if (!code) throw new Error('Give the friend\'s code.'); return handlers['party:save'](code); }
+    if (!name) throw new Error('Give the friend\'s name.');
+    return handlers['party:remove'](name);
+  },
+  async install_mod({ nexusId }) {
+    const r = await handlers['mods:install'](nexusId);
+    return r && r.manual ? { notInstalled: true, why: 'Direct downloads need a Nexus Premium account (or no key is set). Tell the user to use the Install button on the Mods page, which walks them through the free download.' } : r;
+  },
+  uninstall_mod: ({ key }) => handlers['mods:uninstall'](key),
+  add_custom_mod: ({ link, category }) => handlers['mods:addCustom'](String(link), category),
+  update_app_settings: a => handlers['settings:set'](pick(a, ['playerName', 'autoSnapshot', 'keepAutoSnapshots', 'uiScale'])),
+  open_router_port: () => handlers['upnp:open'](),
+  create_bug_report: () => handlers['report:create'](),
+  restore_save_snapshot: ({ id }) => handlers['saves:restore'](id),
+  async run_quick_setup({ cleanup: cl, loadOrder, coopPreset }) {
+    aiEmit({ type: 'navigate', page: 'setup' });
+    return handlers['setup:run']({ cleanup: cl !== false, loadOrder: loadOrder !== false, preset: !!coopPreset });
+  },
+  steam_play_button: ({ action }) => handlers[action === 'setup' ? 'deck:setupPlay' : 'deck:undoPlay'](),
+};
+
+function aiApproval(run, id) {
+  return new Promise(resolve => {
+    run.approvals.set(id, resolve);
+    run.ctrl.signal.addEventListener('abort', () => resolve(false), { once: true });
+  });
+}
+
+let aiToolSeq = 0;
+async function aiRunTool(run, cfg, call) {
+  const tool = aitools.byName.get(call.name);
+  // Servers may reuse call ids between turns ("call_0"), so the panel and approvals get one of their own.
+  const uid = `t${++aiToolSeq}`;
+  const base = { type: 'tool', id: uid, name: call.name };
+  const fail = error => { aiEmit({ ...base, status: 'error', error }); return { error }; };
+  if (!tool || !aiExec[call.name]) return fail(`There is no tool called ${call.name}.`);
+  const args = aitools.coerceArgs(tool, call.arguments);
+  aiEmit({ ...base, status: 'running', args, risk: tool.risk });
+  if (tool.risk !== 'read' && !cfg.allowChanges) return fail('Changes are turned off in the AI settings. Tell the user what to do instead.');
+  const bad = aitools.checkArgs(tool, args);
+  if (bad) return fail(bad);
+  if (tool.risk === 'ask' || (tool.risk === 'change' && !cfg.autoApprove)) {
+    aiEmit({ ...base, status: 'confirm', text: aitools.describeCall(call.name, args), risk: tool.risk });
+    if (!(await aiApproval(run, uid))) {
+      aiEmit({ ...base, status: 'denied' });
+      return { error: run.ctrl.signal.aborted ? 'Stopped by the user.' : 'The user said no to this change.' };
+    }
+    aiEmit({ ...base, status: 'running', args, risk: tool.risk });
+  }
+  try {
+    const data = await aiExec[call.name](args);
+    aiEmit({ ...base, status: 'done', risk: tool.risk });
+    if (tool.risk !== 'read') aiEmit({ type: 'changed' });
+    return data === undefined ? { done: true } : data;
+  } catch (e) {
+    if (/^(TypeError|ReferenceError|RangeError|SyntaxError)$/.test(e.name)) logError(`ai tool ${call.name}`, e);
+    return fail(e.message === 'NO_GAME' ? 'No Skyrim folder is set; the user must choose it first.' : e.message);
+  }
+}
+
+/** The recent conversation, within a rough character budget, starting at a user message. */
+function aiHistory(budget) {
+  let msgs = aiMessages.map((m, i) => (m.role === 'tool' && i < aiMessages.length - 12 && m.content.length > 600 ? { ...m, content: m.content.slice(0, 600) + '… [older result cut]' } : m));
+  const size = list => list.reduce((n, m) => n + String(m.content || '').length + JSON.stringify(m.toolCalls || '').length, 0);
+  while (size(msgs) > budget) {
+    const next = msgs.findIndex((m, i) => i > 0 && m.role === 'user');
+    if (next < 0) break;
+    msgs = msgs.slice(next);
+  }
+  return msgs;
+}
+
+async function aiConversation(run, cfg) {
+  const url = ai.normalizeUrl(cfg.url);
+  const kind = await aiKind(url);
+  const apiKey = aiApiKey(cfg);
+  let model = cfg.model;
+  if (!model) {
+    model = (await ai.listModels(url, kind, apiKey))[0];
+    if (!model) throw new Error(kind === 'ollama' ? 'Ollama has no models yet. Run `ollama pull qwen3:8b` (or another model) first.' : 'The server has no model loaded. Load one in LM Studio first.');
+  }
+  const state = await aiState();
+  // Roughly 3.5 characters per token, leaving room for the briefing, the tools and the answer.
+  const budget = Math.max(6000, (cfg.numCtx || 16384) * 3.5 - 22000);
+  for (let step = 0; step < AI_MAX_STEPS; step++) {
+    const textTools = aiTextMode.has(`${url}|${model}`);
+    const system = aitools.systemPrompt({ state, allowChanges: cfg.allowChanges, autoApprove: cfg.autoApprove, textTools, note: cfg.note });
+    aiEmit({ type: 'turn', model });
+    let res;
+    try {
+      res = await ai.chat({
+        url, kind, model, apiKey, numCtx: cfg.numCtx, signal: run.ctrl.signal,
+        messages: [{ role: 'system', content: system }, ...aiHistory(budget)].map(m => (textTools ? ai.toTextMode([m])[0] : m)),
+        tools: textTools ? null : aitools.specs(cfg.allowChanges),
+        onText: text => aiEmit({ type: 'text', text }),
+        onThinking: text => aiEmit({ type: 'thinking', text }),
+      });
+    } catch (e) {
+      if (e.noTools && !textTools) {
+        aiTextMode.add(`${url}|${model}`);
+        aiEmit({ type: 'notice', text: `${model} can't use tools directly, so the app switched to text instructions for it.` });
+        step--;
+        continue;
+      }
+      throw e;
+    }
+    aiMessages.push({ role: 'assistant', content: res.content, toolCalls: res.toolCalls });
+    if (!res.toolCalls.length) return;
+    for (const call of res.toolCalls) {
+      const out = run.ctrl.signal.aborted ? { error: 'Stopped by the user.' } : await aiRunTool(run, cfg, call);
+      aiMessages.push({ role: 'tool', toolCallId: call.id, name: call.name, content: ai.resultText(out) });
+    }
+    if (run.ctrl.signal.aborted) return;
+  }
+  aiEmit({ type: 'notice', text: `Paused after ${AI_MAX_STEPS} steps. Say "continue" to let it carry on.` });
+}
+
+handle('ai:chat', (text, page) => {
+  if (aiRun) throw new Error('The AI is still working on the last question.');
+  const cfg = aiSettings();
+  if (!cfg.url) throw new Error('Set up the AI first: choose your AI server in the AI panel\'s settings.');
+  text = String(text || '').trim().slice(0, 8000);
+  if (!text) throw new Error('Type a question first.');
+  if (aitools.PAGES.includes(page)) aiPage = page;
+  aiMessages.push({ role: 'user', content: text });
+  const run = aiRun = { ctrl: new AbortController(), approvals: new Map() };
+  aiConversation(run, cfg)
+    .catch(e => {
+      if (e.stopped || run.ctrl.signal.aborted) aiEmit({ type: 'notice', text: 'Stopped.' });
+      else { if (/^(TypeError|ReferenceError|RangeError|SyntaxError)$/.test(e.name)) logError('ai', e); aiEmit({ type: 'error', message: e.message }); }
+    })
+    .finally(() => { aiRun = null; aiEmit({ type: 'done' }); });
+  return true;
+});
+handle('ai:approve', (id, allow) => {
+  const f = aiRun && aiRun.approvals.get(id);
+  if (f) { aiRun.approvals.delete(id); f(!!allow); }
+  return !!f;
+});
+handle('ai:stop', () => { if (aiRun) aiRun.ctrl.abort(); return true; });
+handle('ai:reset', () => {
+  if (aiRun) aiRun.ctrl.abort();
+  aiMessages = [];
+  return true;
 });
 
 // ---------- misc ----------
@@ -1414,7 +1552,7 @@ function createWindow() {
 
 /** Developer aid: STRC_SHOTS=<dir> saves a screenshot of every page, then quits. */
 function captureAllPages(dir) {
-  const pages = ['dashboard', 'setup', 'play', 'deck', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'ai', 'settings'];
+  const pages = ['dashboard', 'setup', 'play', 'deck', 'mods', 'cleanup', 'config', 'friends', 'session', 'backups', 'logs', 'settings'];
   const wait = ms => new Promise(r => setTimeout(r, ms));
   win.webContents.once('did-finish-load', async () => {
     fs.mkdirSync(dir, { recursive: true });
@@ -1431,6 +1569,10 @@ function captureAllPages(dir) {
       // "Set up everything" flow — mods fail cleanly, then cleanup and load order run for real.
       ...(process.env.STRC_NEXUS_MOCK === 'premium' && process.env.STRC_GAME_DIR ? {
         'setup:run': `(async () => { await new Promise(r => setTimeout(r, 1500)); document.querySelector('#runSetup')?.click(); await new Promise(r => setTimeout(r, 400)); document.querySelector('#okBtn')?.click(); await new Promise(r => setTimeout(r, 6000)); })()`,
+      } : {}),
+      // With a stand-in AI server (STRC_AI_URL): ask a question, let it read the setup, allow its change.
+      ...(process.env.STRC_AI_URL ? {
+        'dashboard:ai': `(async () => { const w = ms => new Promise(r => setTimeout(r, ms)); await aiToggle(true); await w(300); await aiSend('Make the server easier'); for (let i = 0; i < 40 && !document.querySelector('[data-approve]'); i++) await w(250); document.querySelector('[data-approve]')?.click(); for (let i = 0; i < 40 && !/MOCK_DONE/.test(document.querySelector('#aiList')?.textContent || ''); i++) await w(250); })()`,
       } : {}),
     };
     const steps = [...pages, ...Object.keys(extra)];
@@ -1450,6 +1592,10 @@ function captureAllPages(dir) {
       const img = await win.webContents.capturePage(undefined, { stayHidden: true, stayAwake: true });
       fs.writeFileSync(path.join(dir, `${step.replace(":", "-")}.png`), img.toPNG());
       report[step] = await win.webContents.executeJavaScript(`({ h1: document.querySelector('main h1')?.textContent, error: document.querySelector('main .render-error')?.textContent || null })`);
+      if (step === 'dashboard:ai') {
+        const chat = await win.webContents.executeJavaScript(`document.querySelector('#aiList')?.textContent || ''`);
+        if (!/MOCK_DONE/.test(chat)) report[step].error = `the AI chat didn't finish: ${chat.slice(-300)}`;
+      }
       // Click through every tab on the page too (each click re-renders, so look the tabs up again each time).
       if (!extra[step]) {
         const count = await win.webContents.executeJavaScript(`document.querySelectorAll('main .tabs button').length`);

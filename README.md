@@ -83,12 +83,12 @@ The app finds Skyrim through Steam. If it doesn't, point it at the folder that c
 | ✅ **Session Checklist** | The pre-session routine that keeps quests in sync, plus a stuck-quest helper. |
 | 🐞 **Bug report** | One zip on your Desktop with logs, crash reports, plugin lists and diagnostics. **Passwords are removed.** |
 | ⬆️ **Updates itself** | The sidebar shows new versions; the portable exe and AppImage update in place, SHA-256 verified. |
+| ✧ **AI Helper** | Connect **your own local AI** (Ollama, LM Studio, llama.cpp, Jan) and ask it anything about your setup. It reads every part of the app (health checks, mods, load order, INI files, logs, crash reports, server, network) and, if you allow it, **fixes things for you**: edits INI and server settings, applies presets, moves mods aside, matches load orders, starts the server. Every change asks first (or not, if you want hands-off automation), and everything it changes is backed up and can be undone. |
 | 📜 **Logs** | Server, client, SKSE and Engine Fixes logs in one place, plus a **crash report reader** that names the mods showing up most in each crash (with [Crash Logger](https://www.nexusmods.com/skyrimspecialedition/mods/59818) installed). |
-| ✳ **AI Assistant** | Connect a **local LLM** — LM Studio, Ollama, llama.cpp, anything that speaks the OpenAI API. It reads your live state (health, mods, logs, configs), can **match a friend's setup** from their code, change config values like the server password, and run the same **safe one-click fixes** as the dashboard. Everything stays on your machine, and the model can never delete anything. |
 
 ### 🔒 Safe by design
 - **Nothing is ever deleted.** Files are *moved* to `<Skyrim>\_STRCompanion_Backup\`, with a manifest so every batch can be restored.
-- Config files are **snapshotted before every save**.
+- Config files are **snapshotted before every save**, and any earlier version can be put back from **Backups → Config history**.
 - Base-game files and the plugins Skyrim Together needs are **locked** and can't be moved.
 - INI and load-order changes are **blocked while Skyrim is running**, because the game would overwrite them on exit.
 - Paths are checked so nothing outside the game folder can ever be moved, including by a malicious mod archive.
@@ -133,8 +133,26 @@ Add your **personal API key** (Nexus → *Settings → API keys*) under **Settin
 
 - **Premium accounts:** installs download directly.
 - **Free accounts:** the app opens the mod's Nexus page. Click **Manual download**, and the app picks up the file from your Downloads folder and offers to install it.
-- Mods with an installer that has options (FOMOD) should be installed with **Vortex** instead. The app tells you when that's the case.
+- Mods with an installer (FOMOD) are installed with the installer's recommended options. If you want different options, install that mod with Vortex.
 - `.rar` archives need [7-Zip](https://www.7-zip.org/) installed. `.7z` and `.zip` work out of the box.
+
+## ✧ Local AI helper
+
+Press **AI Helper** in the sidebar (or **Ctrl+K**).
+
+1. Install [Ollama](https://ollama.com) and run `ollama pull qwen3:8b`. Or, in [LM Studio](https://lmstudio.ai), load a model and start the server from the *Developer* tab.
+2. In the AI panel, click **Ollama** (or **LM Studio**), then **Connect**, pick the model and **Save**.
+3. Ask away: *"What's wrong with my setup?"*, *"Get me ready for co-op with my friends"*, *"Why did my game crash?"*, *"Set the server to 3 players on Master difficulty"*.
+
+**What it knows.** Every time you ask, the app gives the AI a briefing: how Skyrim Together co-op works, what each page does, the safety rules, and a summary of your PC (versions, problems, what's running). It then uses the app's own tools to look up anything else.
+
+**What it can do** depends on two switches in the AI settings:
+- **Let the AI make changes** (off by default). When it's off, the AI only looks and explains.
+- **Don't ask before each change.** For hands-off automation. Restoring saves, Quick Setup and Steam changes always ask.
+
+It **can't** delete backups or snapshots, see your Nexus key, or update the app. Everything runs on your computer. Chats only go to the address you set, and the panel warns you if that address isn't on your own network.
+
+Models with tool support work best: Qwen 3, Llama 3.1 or newer, Mistral Small. With Ollama, the app asks for a 16K context window, which you can change in the AI settings. In LM Studio, load the model with a context length of 16K or more. Models without tool support still work through a text fallback.
 
 ## ❓ FAQ
 

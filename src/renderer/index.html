@@ -29,14 +29,16 @@
       <button data-page="session"><span class="ico">✓</span>Session Checklist</button>
       <button data-page="backups"><span class="ico">⟲</span>Backups</button>
       <button data-page="logs"><span class="ico">≡</span>Logs</button>
-      <button data-page="ai"><span class="ico">✳</span>AI Assistant</button>
       <button data-page="settings"><span class="ico">☰</span>Settings</button>
     </nav>
+    <button id="aiToggle" class="ai-toggle" title="Ask your local AI (Ctrl+K)"><span class="ico">✧</span>AI Helper</button>
     <div class="sidebar-foot" id="gameDirFoot"></div>
   </aside>
   <main id="main"></main>
+  <aside id="aiPanel" class="ai-panel" hidden aria-label="AI helper"></aside>
   <div id="toasts"></div>
   <div id="modal" class="modal hidden"><div class="modal-card" id="modalCard"></div></div>
   <script src="app.js"></script>
+  <script src="ai.js"></script>
 </body>
 </html>

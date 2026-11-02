@@ -1,7 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { exists, readJson, writeJson, moveFile, timestampId, removeEmptyDirs, walkFiles, isInside, dirSize } = require('./util');
+const { exists, readJson, writeJson, moveFile, timestampId, removeEmptyDirs, walkFiles, isInside, dirSize, listDir } = require('./util');
 const plugins = require('./plugins');
 
 /**
@@ -224,6 +224,38 @@ class BackupStore {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.copyFileSync(file, dest);
     return dest;
+  }
+
+  /** Earlier versions of config files kept by snapshotConfig, newest first. `id` is "<time folder>/<file>". */
+  listConfigHistory() {
+    const root = path.join(this.root, 'config-history');
+    const out = [];
+    for (const d of listDir(root)) {
+      if (!d.isDirectory()) continue;
+      for (const f of listDir(path.join(root, d.name))) {
+        if (!f.isFile()) continue;
+        const full = path.join(root, d.name, f.name);
+        let st;
+        try { st = fs.statSync(full); } catch { continue; }
+        // "Skyrim.ini.2" is the second same-second copy of Skyrim.ini.
+        out.push({ id: `${d.name}/${f.name}`, name: f.name.replace(/\.\d+$/, ''), at: st.mtime.toISOString(), size: st.size });
+      }
+    }
+    return out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : b.id.localeCompare(a.id)));
+  }
+
+  /**
+   * Puts an earlier version back into `target` (written in place, like the editor does). The current
+   * version is snapshotted first, so a restore can itself be undone.
+   */
+  restoreConfigVersion(id, target) {
+    const root = path.join(this.root, 'config-history');
+    const src = path.join(root, String(id));
+    if (!/^[\w.-]+\/[^/\\]+$/.test(String(id)) || !isInside(root, src) || !exists(src)) throw new Error('That config version no longer exists.');
+    const safety = this.snapshotConfig(target);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, fs.readFileSync(src));
+    return { restored: target, safety };
   }
 }
 

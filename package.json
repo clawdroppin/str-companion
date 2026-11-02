@@ -1,7 +1,7 @@
 {
   "name": "str-companion",
   "productName": "STR Companion",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Setup, cleanup, config and launch companion for Skyrim Together Reborn co-op (Windows, Linux and Steam Deck).",
   "main": "src/main/main.js",
   "private": true,
@@ -14,11 +14,11 @@
   },
   "dependencies": {
     "7zip-bin": "^5.2.0",
-    "fast-xml-parser": "^4.5.0"
+    "fast-xml-parser": "^5.11.2"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
+    "electron": "^45.2.1",
+    "electron-builder": "^26.18.1"
   },
   "build": {
     "appId": "local.strcompanion",
@@ -53,7 +53,7 @@
     }
   },
   "allowScripts": {
-    "electron@33.4.11": true
+    "electron@45.2.1": true
   },
   "license": "MIT",
   "author": {

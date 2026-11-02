@@ -17,10 +17,11 @@ node test/fixtures.js <dir>   # create a fake Proton-style install, prints its g
 STRC_SHOTS=<dir> npm start
 STRC_COMPARE_CODE=<STR2-…> STRC_SHOTS=<dir> npm start   # the Friends compare and Quick Setup steps use this code instead of your own
 STRC_GAME_DIR=<fake game> STRC_SHOTS=<dir> npm start        # against a fixture instead of the real game
+STRC_AI_URL=<http://…/v1> STRC_SHOTS=<dir> npm start         # adds an AI chat step against that server (ui-check runs a scripted stand-in)
 xvfb-run -a npx electron . --no-sandbox                     # (Linux CI) with the two env vars above
 ```
 
-Before you finish any change: run `npm test` and `node scripts/ui-check.js` (add `--real "<game dir>"` locally). The runner opens the app as several kinds of user (fresh, free Nexus account, Premium account with a different host via the test-only `STRC_NEXUS_MOCK` stand-in), clicks every page and tab, runs a full Quick Setup in the Premium scenario, and fails on any broken page or hidden programming error (`window.__errors`). Then run the `STRC_SHOTS` check and confirm `report.json` shows the right `h1` and `"error": null` for every page. Look at the PNGs for layout problems. Screenshot mode renders offscreen, so frames are always current. CI (`.github/workflows/ci.yml`) runs the tests on Windows and Ubuntu, runs the Linux UI check against a fixture, and on a published release builds and attaches the downloads for both platforms.
+Before you finish any change: run `npm test` and `node scripts/ui-check.js` (add `--real "<game dir>"` locally). The runner opens the app as several kinds of user (fresh, free Nexus account, Premium account with a different host via the test-only `STRC_NEXUS_MOCK` stand-in), clicks every page and tab, runs a full Quick Setup in the Premium scenario, has a scripted stand-in AI read the setup and change a server setting (approved with Allow, then checked in the file), and fails on any broken page or hidden programming error (`window.__errors`). Then run the `STRC_SHOTS` check and confirm `report.json` shows the right `h1` and `"error": null` for every page. Look at the PNGs for layout problems. Screenshot mode renders offscreen, so frames are always current. CI (`.github/workflows/ci.yml`) runs the tests on Windows and Ubuntu, runs the Linux UI check against a fixture, and on a published release builds and attaches the downloads for both platforms.
 
 ## Cross-platform rules
 
@@ -57,11 +58,12 @@ src/core/       Pure Node modules that touch the game. No Electron imports. Unit
   mods.js       catalog + Vortex + registry merge, Nexus update checks
   nexus.js      Nexus Mods v1 API client, downloads
   logs.js       server session parsing, client log problems, SKSE plugin load results, crash-report summaries
-  llm.js        OpenAI-compatible local LLM client (LM Studio, Ollama, llama.cpp): SSE streaming, tool-call agent loop
   launch.js     process status, launching client/server, Steam auto-update setting
+  ai.js         local AI client: OpenAI-compatible streaming + Ollama's own API, tool calls (native or text fallback)
+  aitools.js    what the AI may do (tools with risk levels), argument checks, and its briefing (systemPrompt)
   share.js      STR2- setup codes (deflate + base64url JSON, STR1- still parsed), comparison, load-order match plans
 src/main/       Electron main process. main.js = IPC handlers (`handle('channel', fn)`), preload.js = bridge
-src/renderer/   UI: index.html, styles.css, app.js (vanilla JS, one async function per page)
+src/renderer/   UI: index.html, styles.css, app.js (vanilla JS, one async function per page), ai.js (AI side panel)
 data/           catalog.json (mods), config-meta.json (friendly labels/types), presets.json
 test/           core.test.js, fixtures.js (fake installs, also a CLI for CI)
 scripts/        make-icon.js (renders build/icon.png), package-deck.sh (CI: Steam Deck tarball), install-steamdeck.sh (release asset: one-line installer)
@@ -87,6 +89,7 @@ The renderer talks to the main process only through `api.call(channel, ...args)`
 10. **Don't block the main process** with big file copies; use `fs.promises` (snapshots, installs). A blocked main process freezes the window.
 12. **Return complete shapes from IPC handlers.** Every branch of a handler returns the same fields (use a `base` object and spread it), because pages read them without guards. Quick Setup once crashed on a missing `nxm` field in an early return.
 13. **Errors:** programming errors are logged to `userData/logs/app.log` (main: `logError`, window: `app:logError`) and included in bug reports. Throw plain `Error`s with user-readable messages for expected failures.
+14. **AI helper:** tools run through the same handlers as the pages (`handlers[channel]` in `aiExec`), so every rule above applies to the AI too. When you add a feature, add a tool for it in `aitools.js` (and the `aiExec` entry; a test checks they match) and mention it in the briefing if it changes how co-op works. Risk levels: `read` runs at once, `change` asks unless the user turned that off, `ask` always asks. Never add tools that delete, reveal secrets or update the app. Tool results are trimmed (`ai.resultText`), so return compact data.
 11. **Dialogs:** use `confirmBox()` / `modal(html, onMount, onDismiss)`; dismissal (Esc, backdrop, Cancel) must resolve the caller.
 
 ## Domain facts the code relies on

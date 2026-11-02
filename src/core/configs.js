@@ -60,7 +60,13 @@ function save(paths, id, changes, backups) {
   const text = readText(c.file, '');
   const doc = new IniDoc(text, { toml: !!c.toml });
   let changed = 0;
-  for (const ch of changes) if (doc.set(ch.section, ch.key, ch.value)) changed++;
+  for (const ch of changes) {
+    // A line break (or "]"/"=" in a name) would write extra lines or a broken file.
+    if (!ch || [ch.section, ch.key, ch.value].some(v => /[\r\n]/.test(String(v ?? ''))) || !String(ch.key || '').trim() || /[=\]]/.test(String(ch.key)) || /[\]]/.test(String(ch.section || ''))) {
+      throw new Error(`Invalid setting ${ch && ch.section}/${ch && ch.key}`);
+    }
+    if (doc.set(String(ch.section || ''), String(ch.key).trim(), ch.value)) changed++;
+  }
   if (!changed) return { changed: 0 };
   const snapshot = backups && exists(c.file) ? backups.snapshotConfig(c.file) : null;
   fs.mkdirSync(path.dirname(c.file), { recursive: true });

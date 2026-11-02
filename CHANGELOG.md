@@ -2,6 +2,28 @@
 
 All notable changes to STR Companion. The format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.6.0] — 2026-11-02
+
+### Changed
+- **✧ AI Helper replaces the AI Assistant page.** It is now a side panel (sidebar button or **Ctrl+K**) that stays open while you move around the app, and the AI can open pages to show you things.
+  - **Uses the whole app.** 42 tools cover everything the pages do: health checks and their fixes, mods (install, uninstall, update checks), load order, Anniversary content cleanup, every INI and server setting (any key, not just the well-known ones), presets, backups, save snapshots, config history, logs, crash reports, the server, the network and router port, setup codes, the party, Quick Setup and the Steam Deck Play button.
+  - **Can work almost on its own.** *Let the AI make changes* (off by default) lets it act. Each change shows an **Allow / Don't** card, unless you also turn on *Don't ask before each change*. Restoring saves, Quick Setup and Steam changes always ask. It can never delete backups, see your Nexus key or update the app.
+  - **Gets a briefing on every question.** It learns how Skyrim Together co-op works, what each page does, the safety rules, and a summary of your PC (versions, problems, what's running, the page you're on).
+  - **Works with more servers:** Ollama's own API (with a bigger 16K context, adjustable), plus LM Studio, llama.cpp, Jan and any OpenAI-compatible server. Models without tool support use a text fallback. Reasoning models' thinking is folded away, and answers are formatted.
+  - Your 1.5.0 AI settings (address, model, API key, extra instructions) carry over.
+- **Electron 45** (was 33, which no longer gets security fixes).
+- **fast-xml-parser 5** fixes critical security issues in reading FOMOD installers from downloaded mods.
+- CI uses Node 24 and the current GitHub Actions.
+
+### Added
+- **Backups → Config history:** put back any earlier version of an INI file or `Plugins.txt`. The app has always kept these copies, but there was no way to restore them.
+
+### Fixed
+- The Nexus-link check now correctly names an unquoted handler program and detects when it is missing.
+- Switching a plugin on or off now refuses while Skyrim runs (the game would undo it) and snapshots `Plugins.txt` first.
+- Config values containing line breaks (which could inject extra lines into an INI) are refused.
+- An unreadable answer from GitHub no longer shows up as an app error.
+
 ## [1.5.0] — 2026-11-01
 
 ### Added
